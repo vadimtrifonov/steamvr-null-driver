@@ -28,13 +28,14 @@ function New-RunStatus {
         supervisorPid = $supervisorPid
         supervisor = $State.supervisor
         ready = [bool]$State.ready
-        restored = [bool]$State.restored
+        cleanupComplete = [bool]$State.cleanupComplete
         reason = $State.reason
         error = $State.error
         deadlineUtc = $State.deadlineUtc
+        environment = $State.environment
         evidence = $State.evidence
         processes = @($State.processes | Where-Object { $null -ne $_ })
-        restoration = $State.restoration
+        cleanup = $State.cleanup
     }
 }
 
@@ -80,7 +81,13 @@ function Read-RunConfiguration {
         throw 'The run configuration ID does not match its directory.'
     }
 
-    foreach ($name in @('createdUtc', 'deadlineUtc', 'steamRoot', 'steamVrRoot', 'configRoot', 'settingsPath', 'vrStartupPath', 'vrServerLog')) {
+    if ([int]$configuration.schemaVersion -ne 2) {
+        throw 'The run configuration has an unsupported schema version.'
+    }
+    foreach ($name in @(
+        'createdUtc', 'deadlineUtc', 'steamRoot', 'steamVrRoot',
+        'sourceConfigRoot', 'configRoot', 'logRoot', 'vrStartupPath'
+    )) {
         if (-not [string]$configuration.$name) {
             throw "The run configuration is missing '$name'."
         }
@@ -88,12 +95,17 @@ function Read-RunConfiguration {
     $null = ConvertTo-UtcDateTime $configuration.createdUtc
     $null = ConvertTo-UtcDateTime $configuration.deadlineUtc
 
-    $expectedConfigRoot = ConvertTo-FullPath (Join-Path ([string]$configuration.steamRoot) 'config')
-    if ((ConvertTo-FullPath ([string]$configuration.configRoot)) -ne $expectedConfigRoot) {
-        throw 'The run configuration contains an unexpected Steam config root.'
+    $expectedSourceConfigRoot = ConvertTo-FullPath (Join-Path ([string]$configuration.steamRoot) 'config')
+    $expectedConfigRoot = ConvertTo-FullPath (Join-Path $RunDirectory 'config')
+    $expectedLogRoot = ConvertTo-FullPath (Join-Path $RunDirectory 'logs')
+    if ((ConvertTo-FullPath ([string]$configuration.sourceConfigRoot)) -ne $expectedSourceConfigRoot) {
+        throw 'The run configuration contains an unexpected source config root.'
     }
-    if ((ConvertTo-FullPath ([string]$configuration.settingsPath)) -ne (ConvertTo-FullPath (Join-Path $expectedConfigRoot 'steamvr.vrsettings'))) {
-        throw 'The run configuration contains an unexpected SteamVR settings path.'
+    if ((ConvertTo-FullPath ([string]$configuration.configRoot)) -ne $expectedConfigRoot) {
+        throw 'The run configuration contains an unexpected private config path.'
+    }
+    if ((ConvertTo-FullPath ([string]$configuration.logRoot)) -ne $expectedLogRoot) {
+        throw 'The run configuration contains an unexpected private log path.'
     }
     if (-not (Test-PathWithin -Path ([string]$configuration.vrStartupPath) -Root ([string]$configuration.steamVrRoot))) {
         throw 'The run configuration contains a startup executable outside its SteamVR root.'
@@ -156,15 +168,15 @@ function Get-PendingRunRecords {
             Assert-RunId -RunId $directory.Name
             $statusPath = Join-Path $directory.FullName 'status.json'
             if (-not (Test-Path -LiteralPath $statusPath -PathType Leaf)) {
-                $pending.Add([pscustomobject]@{ runId=$directory.Name; phase='unknown'; restored=$false })
+                $pending.Add([pscustomobject]@{ runId=$directory.Name; phase='unknown'; cleanupComplete=$false })
                 continue
             }
             $status = Read-JsonShared -Path $statusPath
-            if ($null -eq $status.PSObject.Properties['restored'] -or -not [bool]$status.restored) {
-                $pending.Add([pscustomobject]@{ runId=$directory.Name; phase=$status.phase; restored=$false })
+            if ($null -eq $status.PSObject.Properties['cleanupComplete'] -or -not [bool]$status.cleanupComplete) {
+                $pending.Add([pscustomobject]@{ runId=$directory.Name; phase=$status.phase; cleanupComplete=$false })
             }
         } catch {
-            $pending.Add([pscustomobject]@{ runId=$directory.Name; phase='unreadable'; restored=$false; error=$_.Exception.Message })
+            $pending.Add([pscustomobject]@{ runId=$directory.Name; phase='unreadable'; cleanupComplete=$false; error=$_.Exception.Message })
         }
     }
     @($pending)

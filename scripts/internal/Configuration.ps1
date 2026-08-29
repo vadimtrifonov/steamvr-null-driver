@@ -1,11 +1,3 @@
-$script:ProtectedConfigPaths = @(
-    'steamvr.vrsettings',
-    'chaperone_info.vrchap',
-    'chaperone_info.vrchap.tmp',
-    'vrappconfig\openvr.tool.steamvr_room_setup.vrappconfig',
-    'steamvr.vrstats'
-)
-
 function Set-ObjectProperty {
     param(
         [Parameter(Mandatory)]$Object,
@@ -61,106 +53,35 @@ function Get-TemporaryChaperoneText {
 '@
 }
 
-function Get-ProtectedConfigPaths {
-    param([Parameter(Mandatory)][string]$ConfigRoot)
-
-    @($script:ProtectedConfigPaths | ForEach-Object { ConvertTo-FullPath (Join-Path $ConfigRoot $_) })
-}
-
-function New-ProtectedFileManifest {
+function Initialize-PrivateHeadlessConfiguration {
     param(
-        [Parameter(Mandatory)][string[]]$Paths,
-        [Parameter(Mandatory)][string]$BackupDirectory,
-        [Parameter(Mandatory)][string]$ManifestPath
+        [Parameter(Mandatory)][string]$SourceConfigRoot,
+        [Parameter(Mandatory)][string]$ConfigRoot,
+        [Parameter(Mandatory)][string]$LogRoot
     )
 
-    New-Item -ItemType Directory -Path $BackupDirectory -Force | Out-Null
-    $entries = [System.Collections.Generic.List[object]]::new()
+    $sourceSettingsPath = ConvertTo-FullPath (Join-Path $SourceConfigRoot 'steamvr.vrsettings')
+    $settingsPath = ConvertTo-FullPath (Join-Path $ConfigRoot 'steamvr.vrsettings')
+    $chaperonePath = ConvertTo-FullPath (Join-Path $ConfigRoot 'chaperone_info.vrchap')
+    $sourceAppConfigPath = ConvertTo-FullPath (Join-Path $SourceConfigRoot 'appconfig.json')
+    $appConfigPath = ConvertTo-FullPath (Join-Path $ConfigRoot 'appconfig.json')
 
-    for ($index = 0; $index -lt $Paths.Count; $index++) {
-        $path = ConvertTo-FullPath $Paths[$index]
-        $exists = Test-Path -LiteralPath $path -PathType Leaf
-        $entry = [ordered]@{
-            path = $path
-            existed = $exists
-            backup = $null
-            sha256 = $null
-        }
+    $sourceSettings = [System.IO.File]::ReadAllText($sourceSettingsPath)
+    $headlessSettings = ConvertTo-HeadlessSettingsText -InputText $sourceSettings
 
-        if ($exists) {
-            $backupPath = Join-Path $BackupDirectory "$index.bin"
-            $bytes = [System.IO.File]::ReadAllBytes($path)
-            [System.IO.File]::WriteAllBytes($backupPath, $bytes)
-            $entry.backup = ConvertTo-FullPath $backupPath
-            $entry.sha256 = Get-ByteHash -Bytes $bytes
-            if ((Get-ByteHash -Bytes ([System.IO.File]::ReadAllBytes($backupPath))) -ne $entry.sha256) {
-                throw "The backup could not be verified for '$path'."
-            }
-        }
+    New-Item -ItemType Directory -Path $ConfigRoot, $LogRoot -Force | Out-Null
+    [System.IO.File]::WriteAllText($settingsPath, $headlessSettings, [System.Text.UTF8Encoding]::new($false))
+    [System.IO.File]::WriteAllText($chaperonePath, (Get-TemporaryChaperoneText), [System.Text.UTF8Encoding]::new($false))
 
-        $entries.Add([pscustomobject]$entry)
-    }
-
-    Write-JsonAtomic -Path $ManifestPath -Value @($entries)
-    @($entries)
-}
-
-function Restore-ProtectedFileManifest {
-    param(
-        [Parameter(Mandatory)][string]$ManifestPath,
-        [Parameter(Mandatory)][string[]]$ExpectedPaths
-    )
-
-    $entries = @(Read-JsonShared -Path $ManifestPath)
-    $expected = @($ExpectedPaths | ForEach-Object { ConvertTo-FullPath $_ } | Sort-Object)
-    $recorded = @($entries | ForEach-Object { ConvertTo-FullPath ([string]$_.path) } | Sort-Object)
-    if ($expected.Count -ne $recorded.Count -or (Compare-Object -ReferenceObject $expected -DifferenceObject $recorded)) {
-        throw 'The protected-file manifest does not match the declared protected paths.'
-    }
-
-    $results = [System.Collections.Generic.List[object]]::new()
-    $allRestored = $true
-
-    foreach ($entry in $entries) {
-        $restored = $false
-        $errorText = $null
-        try {
-            if ([bool]$entry.existed) {
-                if (-not $entry.backup -or -not $entry.sha256) {
-                    throw 'An existing protected file has no complete backup record.'
-                }
-                $backupBytes = [System.IO.File]::ReadAllBytes([string]$entry.backup)
-                if ((Get-ByteHash -Bytes $backupBytes) -ne [string]$entry.sha256) {
-                    throw 'The protected-file backup hash does not match its manifest.'
-                }
-                $parent = Split-Path -Parent ([string]$entry.path)
-                if (-not (Test-Path -LiteralPath $parent)) {
-                    New-Item -ItemType Directory -Path $parent -Force | Out-Null
-                }
-                [System.IO.File]::WriteAllBytes([string]$entry.path, $backupBytes)
-                $restored = (Get-FileHash -Algorithm SHA256 -LiteralPath ([string]$entry.path)).Hash -eq [string]$entry.sha256
-            } else {
-                if (Test-Path -LiteralPath ([string]$entry.path)) {
-                    Remove-Item -LiteralPath ([string]$entry.path) -Force
-                }
-                $restored = -not (Test-Path -LiteralPath ([string]$entry.path))
-            }
-        } catch {
-            $errorText = $_.Exception.Message
-        }
-
-        if (-not $restored) {
-            $allRestored = $false
-        }
-        $results.Add([pscustomobject]@{
-            path = [string]$entry.path
-            restored = $restored
-            error = $errorText
-        })
+    $appConfigCopied = Test-Path -LiteralPath $sourceAppConfigPath -PathType Leaf
+    if ($appConfigCopied) {
+        [System.IO.File]::WriteAllBytes($appConfigPath, [System.IO.File]::ReadAllBytes($sourceAppConfigPath))
     }
 
     [pscustomobject]@{
-        restored = $allRestored
-        files = @($results)
+        sourceSettingsPath = $sourceSettingsPath
+        settingsPath = $settingsPath
+        chaperonePath = $chaperonePath
+        appConfigCopied = $appConfigCopied
     }
 }

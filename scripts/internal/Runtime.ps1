@@ -53,7 +53,6 @@ function Resolve-SteamVrPaths {
                 configRoot = Join-Path $candidate 'config'
                 settingsPath = $configPath
                 vrStartupPath = $startupPath
-                vrServerLog = Join-Path $candidate 'logs\vrserver.txt'
             })
         }
     }
@@ -186,7 +185,9 @@ function Test-ProcessRecordAlive {
 function Stop-SteamVrRuntime {
     param(
         [Parameter(Mandatory)][string]$SteamVrRoot,
-        [Parameter(Mandatory)][DateTime]$SinceUtc
+        [Parameter(Mandatory)][DateTime]$SinceUtc,
+        [string]$ConfigRoot,
+        [string]$LogRoot
     )
 
     $graceful = [System.Collections.Generic.List[string]]::new()
@@ -210,6 +211,12 @@ function Stop-SteamVrRuntime {
             $info.FileName = $monitor[0].path
             $info.WorkingDirectory = Split-Path -Parent $monitor[0].path
             $info.UseShellExecute = $false
+            if ($ConfigRoot) {
+                $info.Environment['VR_CONFIG_PATH'] = ConvertTo-FullPath $ConfigRoot
+            }
+            if ($LogRoot) {
+                $info.Environment['VR_LOG_PATH'] = ConvertTo-FullPath $LogRoot
+            }
             [void]$info.ArgumentList.Add('vrmonitor://quit')
             [void][System.Diagnostics.Process]::Start($info)
             $graceful.Add("vrmonitor-protocol:$($monitor[0].pid)")
@@ -266,12 +273,29 @@ function Stop-SteamVrRuntime {
     }
 }
 
-function Start-VrStartupProcess {
-    param([Parameter(Mandatory)][string]$Path)
+function New-VrStartupProcessInfo {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$ConfigRoot,
+        [Parameter(Mandatory)][string]$LogRoot
+    )
 
     $info = [System.Diagnostics.ProcessStartInfo]::new()
     $info.FileName = $Path
     $info.WorkingDirectory = Split-Path -Parent $Path
     $info.UseShellExecute = $false
+    $info.Environment['VR_CONFIG_PATH'] = ConvertTo-FullPath $ConfigRoot
+    $info.Environment['VR_LOG_PATH'] = ConvertTo-FullPath $LogRoot
+    $info
+}
+
+function Start-VrStartupProcess {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$ConfigRoot,
+        [Parameter(Mandatory)][string]$LogRoot
+    )
+
+    $info = New-VrStartupProcessInfo -Path $Path -ConfigRoot $ConfigRoot -LogRoot $LogRoot
     [System.Diagnostics.Process]::Start($info)
 }

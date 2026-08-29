@@ -109,18 +109,20 @@ function Start-SteamVrHeadlessRun {
     New-Item -ItemType Directory -Path $runDirectory -Force | Out-Null
     $createdUtc = [DateTime]::UtcNow
     $deadlineUtc = $createdUtc.AddMinutes($MaxDurationMinutes)
+    $configRoot = ConvertTo-FullPath (Join-Path $runDirectory 'config')
+    $logRoot = ConvertTo-FullPath (Join-Path $runDirectory 'logs')
     $configuration = [ordered]@{
-        schemaVersion = 1
+        schemaVersion = 2
         runId = $runId
         createdUtc = $createdUtc.ToString('o')
         deadlineUtc = $deadlineUtc.ToString('o')
         startupTimeoutSeconds = $StartupTimeoutSeconds
         steamRoot = $check.paths.steamRoot
         steamVrRoot = $check.paths.steamVrRoot
-        configRoot = $check.paths.configRoot
-        settingsPath = $check.paths.settingsPath
+        sourceConfigRoot = $check.paths.configRoot
+        configRoot = $configRoot
+        logRoot = $logRoot
         vrStartupPath = $check.paths.vrStartupPath
-        vrServerLog = $check.paths.vrServerLog
         supervisor = $null
     }
     Write-JsonAtomic -Path (Join-Path $runDirectory 'run.json') -Value $configuration
@@ -270,7 +272,7 @@ function Stop-SteamVrHeadlessRun {
         $statusPath = Join-Path $runDirectory 'status.json'
         if (Test-Path -LiteralPath $statusPath -PathType Leaf) {
             $completedStatus = Read-JsonShared -Path $statusPath
-            if ([bool]$completedStatus.restored) {
+            if ([bool]$completedStatus.cleanupComplete) {
                 $active = Get-ActiveRunRecord -StateRoot $StateRoot
                 if ($active -and [string]$active.runId -ceq $RunId) {
                     $null = Remove-ActiveRunRecord -StateRoot $StateRoot -RunId $RunId
@@ -316,7 +318,7 @@ function Stop-SteamVrHeadlessRun {
             $status = Invoke-DeadRunCleanup -RunDirectory $runDirectory -StateRoot $StateRoot -Configuration $configuration
         }
 
-        $ok = [bool]$status.restored -and $status.phase -ne 'recovery-required'
+        $ok = [bool]$status.cleanupComplete -and $status.phase -ne 'recovery-required'
         $result = [pscustomobject]@{ ok=$ok; action='stop'; runId=$RunId; run=$status; error=$status.error }
         if ($ok) {
             Remove-Item -LiteralPath $runDirectory -Recurse -Force

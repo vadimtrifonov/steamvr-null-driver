@@ -9,16 +9,21 @@ function Invoke-DeadRunCleanup {
     $state = [ordered]@{
         supervisor = $Configuration.supervisor
         ready = $false
-        restored = [bool]$cleanup.complete
+        cleanupComplete = [bool]$cleanup.complete
         reason = 'manual-recovery'
         error = $cleanup.error
         deadlineUtc = $Configuration.deadlineUtc
+        environment = [pscustomobject][ordered]@{
+            VR_CONFIG_PATH = $Configuration.configRoot
+            VR_LOG_PATH = $Configuration.logRoot
+        }
         evidence = $null
         processes = if ($cleanup.processStops) { @($cleanup.processStops.remaining) } else { @() }
-        restoration = [pscustomobject]@{
-            files = $cleanup.files
+        cleanup = [pscustomobject]@{
             processStops = $cleanup.processStops
             lockRemoved = $cleanup.lockRemoved
+            privateConfigRoot = $cleanup.privateConfigRoot
+            privateLogRoot = $cleanup.privateLogRoot
         }
     }
     $phase = if ($cleanup.complete) { 'recovered' } else { 'recovery-required' }
@@ -52,13 +57,13 @@ function Invoke-SteamVrHeadlessRecovery {
                 $priorStatus = if (Test-Path -LiteralPath $statusPath -PathType Leaf) { Read-JsonShared -Path $statusPath } else { $null }
                 $ownsActiveLock = $active -and [string]$active.runId -ceq [string]$configuration.runId
 
-                if ($priorStatus -and [bool]$priorStatus.restored) {
+                if ($priorStatus -and [bool]$priorStatus.cleanupComplete) {
                     if ($ownsActiveLock) {
                         $null = Remove-ActiveRunRecord -StateRoot $StateRoot -RunId ([string]$configuration.runId)
                         $active = $null
                     }
                     Remove-Item -LiteralPath $directory.FullName -Recurse -Force
-                    $recovered.Add([pscustomobject]@{ runId=$configuration.runId; result='removed restored journal' })
+                    $recovered.Add([pscustomobject]@{ runId=$configuration.runId; result='removed completed journal' })
                     continue
                 }
 
@@ -84,7 +89,7 @@ function Invoke-SteamVrHeadlessRecovery {
                 }
 
                 $status = Invoke-DeadRunCleanup -RunDirectory $directory.FullName -StateRoot $StateRoot -Configuration $configuration
-                if ($status.restored) {
+                if ($status.cleanupComplete) {
                     $active = $null
                     Remove-Item -LiteralPath $directory.FullName -Recurse -Force
                     $recovered.Add([pscustomobject]@{ runId=$configuration.runId; result='recovered' })

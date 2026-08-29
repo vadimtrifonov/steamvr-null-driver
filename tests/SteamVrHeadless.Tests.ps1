@@ -26,25 +26,27 @@ function Complete-Test {
 function New-FixtureRunConfiguration {
     param(
         [Parameter(Mandatory)][string]$RunId,
+        [Parameter(Mandatory)][string]$RunDirectory,
         [Parameter(Mandatory)][string]$SteamRoot,
         [Parameter(Mandatory)][string]$SteamVrRoot,
-        [Parameter(Mandatory)][string]$SettingsPath,
         [DateTime]$CreatedUtc = [DateTime]::UtcNow,
         [DateTime]$DeadlineUtc = [DateTime]::UtcNow.AddMinutes(10)
     )
 
+    $configRoot = Join-Path $RunDirectory 'config'
+    $logRoot = Join-Path $RunDirectory 'logs'
     [pscustomobject][ordered]@{
-        schemaVersion = 1
+        schemaVersion = 2
         runId = $RunId
         createdUtc = $CreatedUtc.ToString('o')
         deadlineUtc = $DeadlineUtc.ToString('o')
         startupTimeoutSeconds = 15
         steamRoot = $SteamRoot
         steamVrRoot = $SteamVrRoot
-        configRoot = Join-Path $SteamRoot 'config'
-        settingsPath = $SettingsPath
+        sourceConfigRoot = Join-Path $SteamRoot 'config'
+        configRoot = $configRoot
+        logRoot = $logRoot
         vrStartupPath = Join-Path $SteamVrRoot 'bin\win64\vrstartup.exe'
-        vrServerLog = Join-Path $SteamRoot 'logs\vrserver.txt'
         supervisor = $null
     }
 }
@@ -84,7 +86,7 @@ try {
     Complete-Test 'UTC timestamp conversion'
 
     $emptyStatus = & $module {
-        $state = [ordered]@{supervisor=$null;ready=$false;restored=$true;reason=$null;error=$null;deadlineUtc=$null;evidence=$null;processes=$null;restoration=$null}
+        $state = [ordered]@{supervisor=$null;ready=$false;cleanupComplete=$true;reason=$null;error=$null;deadlineUtc=$null;environment=$null;evidence=$null;processes=$null;cleanup=$null}
         New-RunStatus -RunId 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' -Phase 'stopped' -Message 'done' -State $state
     }
     Assert-Equal $emptyStatus.processes.Count 0 'An empty process set was serialized as a null process entry.'
@@ -151,51 +153,6 @@ Active HMD set to tomorrow_headset.Serial 1
     Assert-True $regrownAssessment.modeViolation 'Log replacement skipped a complete driver event before the old offset.'
     Complete-Test 'log cursor detects replacement and regrowth'
 
-    $filesRoot = Join-Path $testRoot 'files'
-    $backupRoot = Join-Path $testRoot 'backup'
-    $manifestPath = Join-Path $testRoot 'manifest.json'
-    New-Item -ItemType Directory -Path $filesRoot -Force | Out-Null
-    $existingPath = Join-Path $filesRoot 'existing.bin'
-    $absentPath = Join-Path $filesRoot 'absent.bin'
-    $originalBytes = [byte[]](0, 1, 2, 13, 10, 255, 42)
-    [System.IO.File]::WriteAllBytes($existingPath, $originalBytes)
-    $originalHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $existingPath).Hash
-    $protectedPaths = @($existingPath, $absentPath)
-
-    & $module {
-        param($Paths, $Backup, $Manifest)
-        New-ProtectedFileManifest -Paths $Paths -BackupDirectory $Backup -ManifestPath $Manifest | Out-Null
-    } $protectedPaths $backupRoot $manifestPath
-
-    $manifest = @(Get-Content -Raw -LiteralPath $manifestPath | ConvertFrom-Json)
-    Assert-True ($null -eq $manifest[0].PSObject.Properties['creationUtc']) 'The manifest still records creation time.'
-    Assert-True ($null -eq $manifest[0].PSObject.Properties['lastWriteUtc']) 'The manifest still records write time.'
-    Assert-True ($null -eq $manifest[0].PSObject.Properties['lastAccessUtc']) 'The manifest still records access time.'
-    Assert-True ($null -eq $manifest[0].PSObject.Properties['attributes']) 'The manifest still records file attributes.'
-
-    [System.IO.File]::WriteAllText($existingPath, 'changed')
-    [System.IO.File]::WriteAllText($absentPath, 'created during run')
-    $restoration = & $module { param($Manifest, $Expected) Restore-ProtectedFileManifest -ManifestPath $Manifest -ExpectedPaths $Expected } $manifestPath $protectedPaths
-    Assert-True $restoration.restored 'The protected-file restoration reported failure.'
-    Assert-Equal (Get-FileHash -Algorithm SHA256 -LiteralPath $existingPath).Hash $originalHash 'Existing bytes were not restored exactly.'
-    Assert-True (-not (Test-Path -LiteralPath $absentPath)) 'A file absent before the run was not removed.'
-    Complete-Test 'protected bytes and existence restoration'
-
-    $corruptManifestPath = Join-Path $testRoot 'corrupt-manifest.json'
-    $corruptBackupRoot = Join-Path $testRoot 'corrupt-backup'
-    & $module {
-        param($Paths, $Backup, $Manifest)
-        New-ProtectedFileManifest -Paths $Paths -BackupDirectory $Backup -ManifestPath $Manifest | Out-Null
-    } @($existingPath) $corruptBackupRoot $corruptManifestPath
-    $corruptManifest = @(Get-Content -Raw -LiteralPath $corruptManifestPath | ConvertFrom-Json)
-    [System.IO.File]::WriteAllText($existingPath, 'current bytes must survive')
-    $currentHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $existingPath).Hash
-    [System.IO.File]::WriteAllText([string]$corruptManifest[0].backup, 'corrupt backup')
-    $corruptResult = & $module { param($Manifest, $Expected) Restore-ProtectedFileManifest -ManifestPath $Manifest -ExpectedPaths $Expected } $corruptManifestPath @($existingPath)
-    Assert-True (-not $corruptResult.restored) 'A corrupt backup was accepted.'
-    Assert-Equal (Get-FileHash -Algorithm SHA256 -LiteralPath $existingPath).Hash $currentHash 'The destination was overwritten before backup validation.'
-    Complete-Test 'backup validation before restoration'
-
     $fakeSteam = Join-Path $testRoot 'Steam'
     $fakeConfig = Join-Path $fakeSteam 'config'
     $fakeRuntime = Join-Path $fakeSteam 'steamapps\common\SteamVR'
@@ -203,7 +160,52 @@ Active HMD set to tomorrow_headset.Serial 1
     New-Item -ItemType Directory -Path $fakeConfig -Force | Out-Null
     [System.IO.File]::WriteAllText((Join-Path $fakeRuntime 'bin\win64\vrstartup.exe'), '')
     $settingsPath = Join-Path $fakeConfig 'steamvr.vrsettings'
-    [System.IO.File]::WriteAllText($settingsPath, '{"steamvr":{}}')
+    [System.IO.File]::WriteAllText($settingsPath, '{"steamvr":{"preserveMe":42}}')
+    [System.IO.File]::WriteAllText((Join-Path $fakeConfig 'appconfig.json'), '{"manifest_paths":["C:\\Steam\\config\\steamapps.vrmanifest"]}')
+
+    $privateFixtureRoot = Join-Path $testRoot 'private-fixture'
+    $privateConfig = Join-Path $privateFixtureRoot 'config'
+    $privateLogs = Join-Path $privateFixtureRoot 'logs'
+    $sourceSettingsHash = (Get-FileHash -LiteralPath $settingsPath -Algorithm SHA256).Hash
+    $privateResult = & $module {
+        param($Source, $Config, $Logs)
+        Initialize-PrivateHeadlessConfiguration -SourceConfigRoot $Source -ConfigRoot $Config -LogRoot $Logs
+    } $fakeConfig $privateConfig $privateLogs
+    $privateSettings = Get-Content -LiteralPath $privateResult.settingsPath -Raw | ConvertFrom-Json
+    Assert-Equal $privateSettings.steamvr.forcedDriver 'null' 'The private settings did not force the null driver.'
+    Assert-Equal $privateSettings.steamvr.preserveMe 42 'The private settings did not preserve an unrelated value.'
+    Assert-Equal (Get-FileHash -LiteralPath $settingsPath -Algorithm SHA256).Hash $sourceSettingsHash 'Private configuration changed the source settings.'
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $fakeConfig 'chaperone_info.vrchap'))) 'Private configuration wrote chaperone data to the source config.'
+    Assert-True (Test-Path -LiteralPath (Join-Path $privateConfig 'chaperone_info.vrchap')) 'Private configuration has no chaperone data.'
+    Assert-Equal (Get-FileHash -LiteralPath (Join-Path $privateConfig 'appconfig.json') -Algorithm SHA256).Hash (Get-FileHash -LiteralPath (Join-Path $fakeConfig 'appconfig.json') -Algorithm SHA256).Hash 'Private configuration did not copy appconfig.json exactly.'
+    Assert-True (Test-Path -LiteralPath $privateLogs -PathType Container) 'Private configuration did not create its log directory.'
+    Complete-Test 'private configuration leaves source settings unchanged'
+
+    $processInfo = & $module {
+        param($Path, $Config, $Logs)
+        New-VrStartupProcessInfo -Path $Path -ConfigRoot $Config -LogRoot $Logs
+    } (Join-Path $fakeRuntime 'bin\win64\vrstartup.exe') $privateConfig $privateLogs
+    Assert-Equal $processInfo.Environment['VR_CONFIG_PATH'] ([IO.Path]::GetFullPath($privateConfig)) 'VR_CONFIG_PATH does not use the private config.'
+    Assert-Equal $processInfo.Environment['VR_LOG_PATH'] ([IO.Path]::GetFullPath($privateLogs)) 'VR_LOG_PATH does not use the private logs.'
+    Complete-Test 'startup environment uses private paths'
+
+    $journalRunId = [Guid]::NewGuid().ToString('N')
+    $journalRun = Join-Path (Join-Path $testRoot 'journal-runs') $journalRunId
+    New-Item -ItemType Directory -Path $journalRun -Force | Out-Null
+    $journalConfiguration = New-FixtureRunConfiguration -RunId $journalRunId -RunDirectory $journalRun -SteamRoot $fakeSteam -SteamVrRoot $fakeRuntime
+    $journalConfiguration | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $journalRun 'run.json') -Encoding utf8NoBOM
+    $null = & $module { param($Run) Read-RunConfiguration -RunDirectory $Run } $journalRun
+    $journalConfiguration.configRoot = Join-Path $fakeConfig 'escaped-private-config'
+    $journalConfiguration | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $journalRun 'run.json') -Encoding utf8NoBOM
+    $journalRejected = $false
+    try {
+        $null = & $module { param($Run) Read-RunConfiguration -RunDirectory $Run } $journalRun
+    } catch {
+        $journalRejected = $true
+    }
+    Assert-True $journalRejected 'The journal accepted a private config path outside its run directory.'
+    Complete-Test 'journal confines private paths to run directory'
+
     $stateRoot = Join-Path $testRoot 'state'
     $check = Invoke-SteamVrHeadlessCheck -SteamRoot $fakeSteam -StateRoot $stateRoot
     Assert-True $check.ok 'The read-only check failed for valid fixture paths.'
@@ -218,7 +220,7 @@ Active HMD set to tomorrow_headset.Serial 1
     Remove-Item -LiteralPath (Join-Path $stateRoot 'active-run.json') -Force
     $pendingDirectory = Join-Path (Join-Path $stateRoot 'runs') 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
     New-Item -ItemType Directory -Path $pendingDirectory -Force | Out-Null
-    '{"phase":"recovery-required","restored":false}' | Set-Content -LiteralPath (Join-Path $pendingDirectory 'status.json') -Encoding utf8NoBOM
+    '{"phase":"recovery-required","cleanupComplete":false}' | Set-Content -LiteralPath (Join-Path $pendingDirectory 'status.json') -Encoding utf8NoBOM
     $check = Invoke-SteamVrHeadlessCheck -SteamRoot $fakeSteam -StateRoot $stateRoot
     Assert-True (-not $check.canStart) 'The read-only check ignored an unfinished run journal.'
     Assert-Equal $check.pendingRuns.Count 1 'The unfinished run journal was not reported.'
@@ -324,59 +326,42 @@ Active HMD set to tomorrow_headset.Serial 1
     $ownershipRun = Join-Path (Join-Path $ownershipState 'runs') $ownershipRunId
     $otherRun = Join-Path (Join-Path $ownershipState 'runs') $otherRunId
     New-Item -ItemType Directory -Path $ownershipRun, $otherRun -Force | Out-Null
-    $ownershipConfiguration = New-FixtureRunConfiguration -RunId $ownershipRunId -SteamRoot $fakeSteam -SteamVrRoot $fakeRuntime -SettingsPath $settingsPath -CreatedUtc ([DateTime]::UtcNow.AddMinutes(-1))
-    $ownershipPaths = & $module { param($ConfigRoot) Get-ProtectedConfigPaths -ConfigRoot $ConfigRoot } $fakeConfig
-    & $module {
-        param($Paths, $Backup, $Manifest)
-        New-ProtectedFileManifest -Paths $Paths -BackupDirectory $Backup -ManifestPath $Manifest | Out-Null
-    } $ownershipPaths (Join-Path $ownershipRun 'backup') (Join-Path $ownershipRun 'protected-files.json')
-    $ownershipOriginalBytes = [System.IO.File]::ReadAllBytes($settingsPath)
-    [System.IO.File]::WriteAllText($settingsPath, 'temporary bytes owned by another run')
-    $ownershipCurrentHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $settingsPath).Hash
+    $ownershipConfiguration = New-FixtureRunConfiguration -RunId $ownershipRunId -RunDirectory $ownershipRun -SteamRoot $fakeSteam -SteamVrRoot $fakeRuntime -CreatedUtc ([DateTime]::UtcNow.AddMinutes(-1))
+    New-Item -ItemType Directory -Path $ownershipConfiguration.configRoot -Force | Out-Null
+    $ownershipMarker = Join-Path $ownershipConfiguration.configRoot 'marker.txt'
+    [System.IO.File]::WriteAllText($ownershipMarker, 'retain')
     [pscustomobject]@{ schemaVersion=1;runId=$otherRunId;runDirectory=$otherRun;createdUtc=[DateTime]::UtcNow.ToString('o');supervisor=$null } | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $ownershipState 'active-run.json') -Encoding utf8NoBOM
-    try {
-        $ownershipCleanup = & $module { param($RunDirectory, $StateRoot, $Configuration) Invoke-RunCleanup -RunDirectory $RunDirectory -StateRoot $StateRoot -Configuration $Configuration } $ownershipRun $ownershipState $ownershipConfiguration
-        Assert-True (-not $ownershipCleanup.complete) 'Cleanup completed without owning the active lock.'
-        Assert-True ($ownershipCleanup.error -match 'active lock') 'Cleanup did not report the ownership error.'
-        Assert-Equal (Get-FileHash -Algorithm SHA256 -LiteralPath $settingsPath).Hash $ownershipCurrentHash 'Cleanup restored files that belonged to another run.'
-        $ownershipActive = Get-Content -Raw -LiteralPath (Join-Path $ownershipState 'active-run.json') | ConvertFrom-Json
-        Assert-Equal $ownershipActive.runId $otherRunId 'Cleanup changed another run active lock.'
-    } finally {
-        [System.IO.File]::WriteAllBytes($settingsPath, $ownershipOriginalBytes)
-    }
+    $ownershipCleanup = & $module { param($RunDirectory, $StateRoot, $Configuration) Invoke-RunCleanup -RunDirectory $RunDirectory -StateRoot $StateRoot -Configuration $Configuration } $ownershipRun $ownershipState $ownershipConfiguration
+    Assert-True (-not $ownershipCleanup.complete) 'Cleanup completed without owning the active lock.'
+    Assert-True ($ownershipCleanup.error -match 'active lock') 'Cleanup did not report the ownership error.'
+    Assert-True (Test-Path -LiteralPath $ownershipMarker) 'Cleanup removed private state that belonged to another run.'
+    $ownershipActive = Get-Content -Raw -LiteralPath (Join-Path $ownershipState 'active-run.json') | ConvertFrom-Json
+    Assert-Equal $ownershipActive.runId $otherRunId 'Cleanup changed another run active lock.'
     Complete-Test 'cleanup requires exact active lock'
 
     $orderState = Join-Path $testRoot 'cleanup-order-state'
     $orderRunId = [Guid]::NewGuid().ToString('N')
     $orderRun = Join-Path (Join-Path $orderState 'runs') $orderRunId
     New-Item -ItemType Directory -Path $orderRun -Force | Out-Null
-    $orderConfiguration = New-FixtureRunConfiguration -RunId $orderRunId -SteamRoot $fakeSteam -SteamVrRoot $fakeRuntime -SettingsPath $settingsPath -CreatedUtc ([DateTime]::UtcNow.AddMinutes(-1))
+    $orderConfiguration = New-FixtureRunConfiguration -RunId $orderRunId -RunDirectory $orderRun -SteamRoot $fakeSteam -SteamVrRoot $fakeRuntime -CreatedUtc ([DateTime]::UtcNow.AddMinutes(-1))
     $orderConfiguration | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $orderRun 'run.json') -Encoding utf8NoBOM
     [pscustomobject]@{ schemaVersion=1;runId=$orderRunId;runDirectory=$orderRun;createdUtc=$orderConfiguration.createdUtc;supervisor=$null } | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $orderState 'active-run.json') -Encoding utf8NoBOM
-    $orderPaths = & $module { param($ConfigRoot) Get-ProtectedConfigPaths -ConfigRoot $ConfigRoot } $fakeConfig
-    & $module {
-        param($Paths, $Backup, $Manifest)
-        New-ProtectedFileManifest -Paths $Paths -BackupDirectory $Backup -ManifestPath $Manifest | Out-Null
-    } $orderPaths (Join-Path $orderRun 'backup') (Join-Path $orderRun 'protected-files.json')
-    $orderOriginalBytes = [System.IO.File]::ReadAllBytes($settingsPath)
-    [System.IO.File]::WriteAllText($settingsPath, 'temporary bytes must remain while runtime remains')
-    $orderCurrentHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $settingsPath).Hash
     & $module {
         Set-Item -Path Function:script:Stop-SteamVrRuntime -Value {
-            param($SteamVrRoot, $SinceUtc)
-            [pscustomobject]@{ graceful=@();forced=@();errors=@();remaining=@([pscustomobject]@{pid=1;name='vrserver'});verifiedStopped=$false }
+            param($SteamVrRoot, $SinceUtc, $ConfigRoot, $LogRoot)
+            [pscustomobject]@{ graceful=@();forced=@();errors=@();remaining=@([pscustomobject]@{pid=1;name='vrserver'});verifiedStopped=$false;configRoot=$ConfigRoot;logRoot=$LogRoot }
         }
     }
     try {
         $orderCleanup = & $module { param($RunDirectory, $StateRoot, $Configuration) Invoke-RunCleanup -RunDirectory $RunDirectory -StateRoot $StateRoot -Configuration $Configuration } $orderRun $orderState $orderConfiguration
         Assert-True (-not $orderCleanup.complete) 'Cleanup completed while a runtime process remained.'
-        Assert-Equal (Get-FileHash -Algorithm SHA256 -LiteralPath $settingsPath).Hash $orderCurrentHash 'Cleanup restored files before runtime shutdown completed.'
+        Assert-Equal $orderCleanup.processStops.configRoot $orderConfiguration.configRoot 'Cleanup did not use the private config for the quit process.'
+        Assert-Equal $orderCleanup.processStops.logRoot $orderConfiguration.logRoot 'Cleanup did not use the private logs for the quit process.'
         Assert-True (Test-Path -LiteralPath (Join-Path $orderState 'active-run.json')) 'Cleanup removed the lock while a runtime process remained.'
     } finally {
         & $module { Remove-Item -Path Function:script:Stop-SteamVrRuntime -Force }
-        [System.IO.File]::WriteAllBytes($settingsPath, $orderOriginalBytes)
     }
-    Complete-Test 'runtime stops before file restoration'
+    Complete-Test 'runtime stops before lock removal'
 
     Remove-Item -LiteralPath $stateRoot -Recurse -Force
     $badStartupPath = Join-Path $fakeRuntime 'bin\win64\vrstartup.exe'
@@ -386,19 +371,20 @@ Active HMD set to tomorrow_headset.Serial 1
     Assert-Equal $LASTEXITCODE 1 'The invalid startup executable did not fail the detached run.'
     $startResult = ($startOutput -join "`n") | ConvertFrom-Json
     Assert-Equal $startResult.run.phase 'failed' 'The detached supervisor did not report a controlled failure.'
-    Assert-True $startResult.run.restored 'The detached supervisor did not restore the protected files.'
-    Assert-Equal (Get-FileHash -Algorithm SHA256 -LiteralPath $settingsPath).Hash $settingsHash 'The detached failure changed the fixture settings.'
-    Assert-True (-not (Test-Path -LiteralPath (Join-Path $fakeConfig 'chaperone_info.vrchap'))) 'The detached failure left a chaperone file.'
+    Assert-True $startResult.run.cleanupComplete 'The detached supervisor did not complete cleanup.'
+    Assert-Equal (Get-FileHash -Algorithm SHA256 -LiteralPath $settingsPath).Hash $settingsHash 'The detached failure changed the source settings.'
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $fakeConfig 'chaperone_info.vrchap'))) 'The detached failure wrote chaperone data to the source config.'
+    Assert-True ($startResult.run.environment.VR_CONFIG_PATH -match [regex]::Escape($startResult.runId)) 'The run did not report its private config environment.'
     Assert-True (-not (Test-Path -LiteralPath (Join-Path $stateRoot 'active-run.json'))) 'The detached failure left an active-run lock.'
     $supervisorDeadline = [DateTime]::UtcNow.AddSeconds(5)
     while ((Get-Process -Id ([int]$startResult.run.supervisorPid) -ErrorAction SilentlyContinue) -and [DateTime]::UtcNow -lt $supervisorDeadline) {
         Start-Sleep -Milliseconds 100
     }
     $recoverOutput = & $entryScript recover -StateRoot $stateRoot 2>&1
-    Assert-Equal $LASTEXITCODE 0 'Recovery did not remove the restored failure journal.'
+    Assert-Equal $LASTEXITCODE 0 'Recovery did not remove the completed failure journal.'
     $null = ($recoverOutput -join "`n") | ConvertFrom-Json
-    Assert-Equal (@(Get-ChildItem -LiteralPath (Join-Path $stateRoot 'runs') -Directory -ErrorAction SilentlyContinue).Count) 0 'Recovery left a restored run journal.'
-    Complete-Test 'detached supervisor failure restoration'
+    Assert-Equal (@(Get-ChildItem -LiteralPath (Join-Path $stateRoot 'runs') -Directory -ErrorAction SilentlyContinue).Count) 0 'Recovery left a completed run journal.'
+    Complete-Test 'detached supervisor failure cleanup'
 
     $multipleState = Join-Path $testRoot 'multiple-journal-state'
     $staleOwnerRunId = [Guid]::NewGuid().ToString('N')
@@ -406,49 +392,29 @@ Active HMD set to tomorrow_headset.Serial 1
     $staleOwnerRun = Join-Path (Join-Path $multipleState 'runs') $staleOwnerRunId
     $activeOwnerRun = Join-Path (Join-Path $multipleState 'runs') $activeOwnerRunId
     New-Item -ItemType Directory -Path $staleOwnerRun, $activeOwnerRun -Force | Out-Null
-    $staleOwnerConfiguration = New-FixtureRunConfiguration -RunId $staleOwnerRunId -SteamRoot $fakeSteam -SteamVrRoot $fakeRuntime -SettingsPath $settingsPath -CreatedUtc ([DateTime]::UtcNow.AddMinutes(-1))
-    $activeOwnerConfiguration = New-FixtureRunConfiguration -RunId $activeOwnerRunId -SteamRoot $fakeSteam -SteamVrRoot $fakeRuntime -SettingsPath $settingsPath
+    $staleOwnerConfiguration = New-FixtureRunConfiguration -RunId $staleOwnerRunId -RunDirectory $staleOwnerRun -SteamRoot $fakeSteam -SteamVrRoot $fakeRuntime -CreatedUtc ([DateTime]::UtcNow.AddMinutes(-1))
+    $activeOwnerConfiguration = New-FixtureRunConfiguration -RunId $activeOwnerRunId -RunDirectory $activeOwnerRun -SteamRoot $fakeSteam -SteamVrRoot $fakeRuntime
     $staleOwnerConfiguration | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $staleOwnerRun 'run.json') -Encoding utf8NoBOM
     $activeOwnerConfiguration | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $activeOwnerRun 'run.json') -Encoding utf8NoBOM
-    $multiplePaths = & $module { param($ConfigRoot) Get-ProtectedConfigPaths -ConfigRoot $ConfigRoot } $fakeConfig
-    & $module {
-        param($Paths, $Backup, $Manifest)
-        New-ProtectedFileManifest -Paths $Paths -BackupDirectory $Backup -ManifestPath $Manifest | Out-Null
-    } $multiplePaths (Join-Path $staleOwnerRun 'backup') (Join-Path $staleOwnerRun 'protected-files.json')
-    [pscustomobject]@{ runId=$staleOwnerRunId;phase='configuring';restored=$false } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $staleOwnerRun 'status.json') -Encoding utf8NoBOM
+    [pscustomobject]@{ runId=$staleOwnerRunId;phase='configuring';cleanupComplete=$false } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $staleOwnerRun 'status.json') -Encoding utf8NoBOM
     [pscustomobject]@{ schemaVersion=1;runId=$activeOwnerRunId;runDirectory=$activeOwnerRun;createdUtc=$activeOwnerConfiguration.createdUtc;supervisor=$null } | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $multipleState 'active-run.json') -Encoding utf8NoBOM
-    $multipleOriginalBytes = [System.IO.File]::ReadAllBytes($settingsPath)
-    [System.IO.File]::WriteAllText($settingsPath, 'active owner temporary bytes')
-    $multipleCurrentHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $settingsPath).Hash
-    try {
-        $multipleOutput = & $entryScript recover -StateRoot $multipleState 2>&1
-        Assert-Equal $LASTEXITCODE 1 'Recovery reported success for an unfinished non-owner journal.'
-        $multipleResult = ($multipleOutput -join "`n") | ConvertFrom-Json
-        Assert-Equal $multipleResult.active.Count 1 'Recovery did not retain the active owner.'
-        Assert-Equal $multipleResult.errors.Count 1 'Recovery did not report the unfinished non-owner journal.'
-        Assert-Equal (Get-FileHash -Algorithm SHA256 -LiteralPath $settingsPath).Hash $multipleCurrentHash 'Recovery restored an older run over the active owner.'
-        $multipleActive = Get-Content -Raw -LiteralPath (Join-Path $multipleState 'active-run.json') | ConvertFrom-Json
-        Assert-Equal $multipleActive.runId $activeOwnerRunId 'Recovery changed the active owner lock.'
-    } finally {
-        [System.IO.File]::WriteAllBytes($settingsPath, $multipleOriginalBytes)
-    }
+    $multipleOutput = & $entryScript recover -StateRoot $multipleState 2>&1
+    Assert-Equal $LASTEXITCODE 1 'Recovery reported success for an unfinished non-owner journal.'
+    $multipleResult = ($multipleOutput -join "`n") | ConvertFrom-Json
+    Assert-Equal $multipleResult.active.Count 1 'Recovery did not retain the active owner.'
+    Assert-Equal $multipleResult.errors.Count 1 'Recovery did not report the unfinished non-owner journal.'
+    $multipleActive = Get-Content -Raw -LiteralPath (Join-Path $multipleState 'active-run.json') | ConvertFrom-Json
+    Assert-Equal $multipleActive.runId $activeOwnerRunId 'Recovery changed the active owner lock.'
     Complete-Test 'recovery refuses unfinished non-owner journals'
 
     $staleState = Join-Path $testRoot 'stale-state'
     $staleRunId = [Guid]::NewGuid().ToString('N')
     $staleRun = Join-Path (Join-Path $staleState 'runs') $staleRunId
     New-Item -ItemType Directory -Path $staleRun -Force | Out-Null
-    $staleManifest = Join-Path $staleRun 'protected-files.json'
-    $staleChaperone = Join-Path $fakeConfig 'chaperone_info.vrchap'
     $staleHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $settingsPath).Hash
-    $declaredPaths = & $module { param($ConfigRoot) Get-ProtectedConfigPaths -ConfigRoot $ConfigRoot } $fakeConfig
-    & $module {
-        param($Paths, $Backup, $Manifest)
-        New-ProtectedFileManifest -Paths $Paths -BackupDirectory $Backup -ManifestPath $Manifest | Out-Null
-    } $declaredPaths (Join-Path $staleRun 'backup') $staleManifest
-    [System.IO.File]::WriteAllText($settingsPath, 'stale change')
-    [System.IO.File]::WriteAllText($staleChaperone, 'stale file')
-    $staleConfiguration = New-FixtureRunConfiguration -RunId $staleRunId -SteamRoot $fakeSteam -SteamVrRoot $fakeRuntime -SettingsPath $settingsPath -CreatedUtc ([DateTime]::UtcNow.AddMinutes(-1))
+    $staleConfiguration = New-FixtureRunConfiguration -RunId $staleRunId -RunDirectory $staleRun -SteamRoot $fakeSteam -SteamVrRoot $fakeRuntime -CreatedUtc ([DateTime]::UtcNow.AddMinutes(-1))
+    New-Item -ItemType Directory -Path $staleConfiguration.configRoot, $staleConfiguration.logRoot -Force | Out-Null
+    [System.IO.File]::WriteAllText((Join-Path $staleConfiguration.configRoot 'marker.txt'), 'private state')
     $staleConfiguration | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $staleRun 'run.json') -Encoding utf8NoBOM
     [pscustomobject]@{ schemaVersion=1;runId=$staleRunId;runDirectory=$staleRun;createdUtc=$staleConfiguration.createdUtc;supervisor=$null } | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $staleState 'active-run.json') -Encoding utf8NoBOM
 
@@ -477,8 +443,7 @@ Active HMD set to tomorrow_headset.Serial 1
         Assert-True $staleResult.ok 'Stale recovery did not report success.'
         $fakeVrProcess.Refresh()
         Assert-True $fakeVrProcess.HasExited 'Stale recovery left a runtime-root process alive.'
-        Assert-Equal (Get-FileHash -Algorithm SHA256 -LiteralPath $settingsPath).Hash $staleHash 'Stale recovery did not restore the settings.'
-        Assert-True (-not (Test-Path -LiteralPath $staleChaperone)) 'Stale recovery did not remove the created file.'
+        Assert-Equal (Get-FileHash -Algorithm SHA256 -LiteralPath $settingsPath).Hash $staleHash 'Stale recovery changed the source settings.'
         Assert-True (-not (Test-Path -LiteralPath (Join-Path $staleState 'active-run.json'))) 'Stale recovery left the active-run lock.'
         Assert-True (-not (Test-Path -LiteralPath $staleRun)) 'Stale recovery left the recovered run journal.'
     } finally {
@@ -505,7 +470,7 @@ Active HMD set to tomorrow_headset.Serial 1
     $handoffRunId = [Guid]::NewGuid().ToString('N')
     $handoffRun = Join-Path (Join-Path $handoffState 'runs') $handoffRunId
     New-Item -ItemType Directory -Path $handoffRun -Force | Out-Null
-    $handoffConfiguration = New-FixtureRunConfiguration -RunId $handoffRunId -SteamRoot $fakeSteam -SteamVrRoot $fakeRuntime -SettingsPath $settingsPath
+    $handoffConfiguration = New-FixtureRunConfiguration -RunId $handoffRunId -RunDirectory $handoffRun -SteamRoot $fakeSteam -SteamVrRoot $fakeRuntime
     $handoffConfiguration | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $handoffRun 'run.json') -Encoding utf8NoBOM
     [pscustomobject]@{ schemaVersion=1;runId=$handoffRunId;runDirectory=$handoffRun;createdUtc=$handoffConfiguration.createdUtc;supervisor=$null } | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $handoffState 'active-run.json') -Encoding utf8NoBOM
     $handoffOutput = & $entryScript recover -StateRoot $handoffState 2>&1
@@ -519,67 +484,15 @@ Active HMD set to tomorrow_headset.Serial 1
     $preflightRunId = [Guid]::NewGuid().ToString('N')
     $preflightRun = Join-Path (Join-Path $preflightState 'runs') $preflightRunId
     New-Item -ItemType Directory -Path $preflightRun -Force | Out-Null
-    $preflightConfiguration = New-FixtureRunConfiguration -RunId $preflightRunId -SteamRoot $fakeSteam -SteamVrRoot $fakeRuntime -SettingsPath $settingsPath -CreatedUtc ([DateTime]::UtcNow.AddMinutes(-1))
+    $preflightConfiguration = New-FixtureRunConfiguration -RunId $preflightRunId -RunDirectory $preflightRun -SteamRoot $fakeSteam -SteamVrRoot $fakeRuntime -CreatedUtc ([DateTime]::UtcNow.AddMinutes(-1))
     $preflightConfiguration | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $preflightRun 'run.json') -Encoding utf8NoBOM
     [pscustomobject]@{ schemaVersion=1;runId=$preflightRunId;runDirectory=$preflightRun;createdUtc=$preflightConfiguration.createdUtc;supervisor=$null } | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $preflightState 'active-run.json') -Encoding utf8NoBOM
     $preflightOutput = & $entryScript recover -StateRoot $preflightState 2>&1
-    Assert-Equal $LASTEXITCODE 0 'Pre-manifest recovery returned an error.'
+    Assert-Equal $LASTEXITCODE 0 'Pre-configuration recovery returned an error.'
     $preflightResult = ($preflightOutput -join "`n") | ConvertFrom-Json
-    Assert-True $preflightResult.ok 'Pre-manifest recovery did not report success.'
-    Assert-True (-not (Test-Path -LiteralPath $preflightState)) 'Pre-manifest recovery left state artifacts.'
-    Complete-Test 'pre-manifest interruption recovery'
-
-    $missingManifestState = Join-Path $testRoot 'missing-manifest-state'
-    $missingManifestRunId = [Guid]::NewGuid().ToString('N')
-    $missingManifestRun = Join-Path (Join-Path $missingManifestState 'runs') $missingManifestRunId
-    New-Item -ItemType Directory -Path $missingManifestRun -Force | Out-Null
-    $missingManifestConfiguration = New-FixtureRunConfiguration -RunId $missingManifestRunId -SteamRoot $fakeSteam -SteamVrRoot $fakeRuntime -SettingsPath $settingsPath -CreatedUtc ([DateTime]::UtcNow.AddMinutes(-1))
-    $missingManifestConfiguration | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $missingManifestRun 'run.json') -Encoding utf8NoBOM
-    [System.IO.File]::WriteAllText((Join-Path $missingManifestRun 'configuration-started'), [DateTime]::UtcNow.ToString('o'))
-    [pscustomobject]@{ runId=$missingManifestRunId;phase='configuring';restored=$false } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $missingManifestRun 'status.json') -Encoding utf8NoBOM
-    [pscustomobject]@{ schemaVersion=1;runId=$missingManifestRunId;runDirectory=$missingManifestRun;createdUtc=$missingManifestConfiguration.createdUtc;supervisor=$null } | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $missingManifestState 'active-run.json') -Encoding utf8NoBOM
-    $missingManifestOriginalBytes = [System.IO.File]::ReadAllBytes($settingsPath)
-    [System.IO.File]::WriteAllText($settingsPath, 'temporary settings with missing manifest')
-    $missingManifestCurrentHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $settingsPath).Hash
-    try {
-        $missingManifestOutput = & $entryScript recover -StateRoot $missingManifestState 2>&1
-        Assert-Equal $LASTEXITCODE 1 'Recovery reported success after a configured run lost its manifest.'
-        $missingManifestResult = ($missingManifestOutput -join "`n") | ConvertFrom-Json
-        Assert-True (-not $missingManifestResult.ok) 'A missing post-configuration manifest reported successful recovery.'
-        Assert-Equal (Get-FileHash -Algorithm SHA256 -LiteralPath $settingsPath).Hash $missingManifestCurrentHash 'Recovery changed settings without a manifest.'
-        Assert-True (Test-Path -LiteralPath (Join-Path $missingManifestState 'active-run.json')) 'Recovery removed the lock for a missing manifest.'
-        Assert-True (Test-Path -LiteralPath $missingManifestRun) 'Recovery removed evidence for a missing manifest.'
-    } finally {
-        [System.IO.File]::WriteAllBytes($settingsPath, $missingManifestOriginalBytes)
-    }
-    Complete-Test 'missing configured manifest is refused'
-
-    $failedState = Join-Path $testRoot 'failed-state'
-    $failedRunId = [Guid]::NewGuid().ToString('N')
-    $failedRun = Join-Path (Join-Path $failedState 'runs') $failedRunId
-    New-Item -ItemType Directory -Path $failedRun -Force | Out-Null
-    $failedConfiguration = New-FixtureRunConfiguration -RunId $failedRunId -SteamRoot $fakeSteam -SteamVrRoot $fakeRuntime -SettingsPath $settingsPath -CreatedUtc ([DateTime]::UtcNow.AddMinutes(-1))
-    $failedConfiguration | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $failedRun 'run.json') -Encoding utf8NoBOM
-    $failedPaths = & $module { param($ConfigRoot) Get-ProtectedConfigPaths -ConfigRoot $ConfigRoot } $fakeConfig
-    & $module {
-        param($Paths, $Backup, $Manifest)
-        New-ProtectedFileManifest -Paths $Paths -BackupDirectory $Backup -ManifestPath $Manifest | Out-Null
-    } $failedPaths (Join-Path $failedRun 'backup') (Join-Path $failedRun 'protected-files.json')
-    $failedManifest = @(Get-Content -Raw -LiteralPath (Join-Path $failedRun 'protected-files.json') | ConvertFrom-Json)
-    $settingsEntry = @($failedManifest | Where-Object { $_.path -eq $settingsPath })[0]
-    Remove-Item -LiteralPath ([string]$settingsEntry.backup) -Force
-    [System.IO.File]::WriteAllText($settingsPath, 'leave current bytes on failed recovery')
-    $failedCurrentHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $settingsPath).Hash
-    [pscustomobject]@{ runId=$failedRunId;phase='configuring';restored=$false } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $failedRun 'status.json') -Encoding utf8NoBOM
-    [pscustomobject]@{ schemaVersion=1;runId=$failedRunId;runDirectory=$failedRun;createdUtc=$failedConfiguration.createdUtc;supervisor=$null } | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $failedState 'active-run.json') -Encoding utf8NoBOM
-    $failedOutput = & $entryScript recover -StateRoot $failedState 2>&1
-    Assert-Equal $LASTEXITCODE 1 'Incomplete recovery returned success.'
-    $failedResult = ($failedOutput -join "`n") | ConvertFrom-Json
-    Assert-True (-not $failedResult.ok) 'Incomplete recovery reported success.'
-    Assert-Equal (Get-FileHash -Algorithm SHA256 -LiteralPath $settingsPath).Hash $failedCurrentHash 'Failed backup validation overwrote current settings bytes.'
-    Assert-True (Test-Path -LiteralPath (Join-Path $failedState 'active-run.json')) 'Incomplete recovery removed the safety lock.'
-    Assert-True (Test-Path -LiteralPath $failedRun) 'Incomplete recovery removed its diagnostic journal.'
-    Complete-Test 'incomplete recovery safety lock'
+    Assert-True $preflightResult.ok 'Pre-configuration recovery did not report success.'
+    Assert-True (-not (Test-Path -LiteralPath $preflightState)) 'Pre-configuration recovery left state artifacts.'
+    Complete-Test 'pre-configuration interruption recovery'
 
     $currentSupervisor = & $module { Get-CurrentProcessRecord }
     $reusedIdentity = [pscustomobject]@{
@@ -608,7 +521,7 @@ Active HMD set to tomorrow_headset.Serial 1
     $leaseRunId = [Guid]::NewGuid().ToString('N')
     $leaseRun = Join-Path (Join-Path $leaseState 'runs') $leaseRunId
     New-Item -ItemType Directory -Path $leaseRun -Force | Out-Null
-    $leaseConfiguration = New-FixtureRunConfiguration -RunId $leaseRunId -SteamRoot $fakeSteam -SteamVrRoot $fakeRuntime -SettingsPath $settingsPath -CreatedUtc ([DateTime]::UtcNow.AddMinutes(-2)) -DeadlineUtc ([DateTime]::UtcNow.AddMinutes(-1))
+    $leaseConfiguration = New-FixtureRunConfiguration -RunId $leaseRunId -RunDirectory $leaseRun -SteamRoot $fakeSteam -SteamVrRoot $fakeRuntime -CreatedUtc ([DateTime]::UtcNow.AddMinutes(-2)) -DeadlineUtc ([DateTime]::UtcNow.AddMinutes(-1))
     $leaseConfiguration | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $leaseRun 'run.json') -Encoding utf8NoBOM
     [pscustomobject]@{ schemaVersion=1;runId=$leaseRunId;runDirectory=$leaseRun;createdUtc=$leaseConfiguration.createdUtc;supervisor=$null } | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $leaseState 'active-run.json') -Encoding utf8NoBOM
     $leaseSettingsHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $settingsPath).Hash
@@ -617,7 +530,7 @@ Active HMD set to tomorrow_headset.Serial 1
     Invoke-SteamVrHeadlessSupervisor -RunId $leaseRunId -StateRoot $leaseState
     $leaseStatus = Get-Content -Raw -LiteralPath (Join-Path $leaseRun 'status.json') | ConvertFrom-Json
     Assert-Equal $leaseStatus.phase 'expired' 'An expired lease entered normal startup.'
-    Assert-True $leaseStatus.restored 'An expired pre-start lease did not clean its journal state.'
+    Assert-True $leaseStatus.cleanupComplete 'An expired pre-start lease did not clean its journal state.'
     Assert-Equal (Get-FileHash -Algorithm SHA256 -LiteralPath $settingsPath).Hash $leaseSettingsHash 'An expired pre-start lease changed settings bytes.'
     Assert-True (-not (Test-Path -LiteralPath (Join-Path $leaseState 'active-run.json'))) 'An expired pre-start lease left its active lock.'
     Complete-Test 'lease is a hard startup deadline'
