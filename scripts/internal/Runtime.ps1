@@ -55,25 +55,6 @@ function Resolve-SteamVrPaths {
         [string]$SteamVrRoot
     )
 
-    $steamRoots = @(if ($SteamRoot) {
-        ConvertTo-FullPath $SteamRoot
-    } else {
-        Get-RegisteredSteamRoots
-    })
-    if ($steamRoots.Count -eq 0) {
-        throw 'Steam was not found in the supported registry locations. Supply -SteamRoot.'
-    }
-
-    $sourceRoots = @($steamRoots | Where-Object {
-        Test-Path -LiteralPath (Join-Path $_ 'config\steamvr.vrsettings') -PathType Leaf
-    })
-    if ($sourceRoots.Count -eq 0) {
-        throw 'No Steam root contained config\steamvr.vrsettings. Supply -SteamRoot.'
-    }
-    if ($sourceRoots.Count -gt 1) {
-        throw "More than one Steam root contained source settings: $($sourceRoots -join ', '). Supply -SteamRoot."
-    }
-
     if ($SteamVrRoot) {
         $runtimeRoot = ConvertTo-FullPath $SteamVrRoot
     } else {
@@ -83,24 +64,39 @@ function Resolve-SteamVrPaths {
         if ($registeredRoots.Count -gt 1) {
             throw "More than one registered SteamVR installation was found: $($registeredRoots -join ', '). Supply -SteamVrRoot."
         }
-        $runtimeRoot = if ($registeredRoots.Count -eq 1) {
-            $registeredRoots[0]
+
+        if ($registeredRoots.Count -eq 1) {
+            $runtimeRoot = $registeredRoots[0]
         } else {
-            ConvertTo-FullPath (Join-Path $sourceRoots[0] 'steamapps\common\SteamVR')
+            $steamRoots = @(if ($SteamRoot) {
+                ConvertTo-FullPath $SteamRoot
+            } else {
+                Get-RegisteredSteamRoots
+            })
+            $runtimeRoots = @($steamRoots | ForEach-Object {
+                $candidate = ConvertTo-FullPath (Join-Path $_ 'steamapps\common\SteamVR')
+                if (Test-Path -LiteralPath (Join-Path $candidate 'bin\win64\vrstartup.exe') -PathType Leaf) {
+                    $candidate
+                }
+            } | Sort-Object -Unique)
+            if ($runtimeRoots.Count -eq 0) {
+                throw 'SteamVR was not found in its app registration or under a registered Steam root. Supply -SteamVrRoot.'
+            }
+            if ($runtimeRoots.Count -gt 1) {
+                throw "More than one SteamVR installation was found under Steam roots: $($runtimeRoots -join ', '). Supply -SteamVrRoot."
+            }
+            $runtimeRoot = $runtimeRoots[0]
         }
     }
-    $startupPath = Join-Path $runtimeRoot 'bin\win64\vrstartup.exe'
+
+    $startupPath = ConvertTo-FullPath (Join-Path $runtimeRoot 'bin\win64\vrstartup.exe')
     if (-not (Test-Path -LiteralPath $startupPath -PathType Leaf)) {
-        throw 'SteamVR was not found in its Steam app registration or under the Steam root. Supply -SteamVrRoot.'
+        throw 'The selected SteamVR root has no bin\win64\vrstartup.exe.'
     }
 
-    $sourceConfigRoot = ConvertTo-FullPath (Join-Path $sourceRoots[0] 'config')
     [pscustomobject]@{
-        steamRoot = ConvertTo-FullPath $sourceRoots[0]
         steamVrRoot = ConvertTo-FullPath $runtimeRoot
-        sourceConfigRoot = $sourceConfigRoot
-        sourceSettingsPath = Join-Path $sourceConfigRoot 'steamvr.vrsettings'
-        vrStartupPath = ConvertTo-FullPath $startupPath
+        vrStartupPath = $startupPath
     }
 }
 

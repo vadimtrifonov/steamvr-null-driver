@@ -1,37 +1,22 @@
-function Set-ObjectProperty {
-    param(
-        [Parameter(Mandatory)]$Object,
-        [Parameter(Mandatory)][string]$Name,
-        [Parameter(Mandatory)]$Value
-    )
-
-    if ($null -eq $Object.PSObject.Properties[$Name]) {
-        $Object | Add-Member -MemberType NoteProperty -Name $Name -Value $Value
-    } else {
-        $Object.$Name = $Value
-    }
+function Get-HeadlessSettingsText {
+    @'
+{
+  "steamvr": {
+    "requireHmd": false,
+    "forcedDriver": "null",
+    "activateMultipleDrivers": false,
+    "startDashboardFromAppLaunch": false,
+    "startOverlayAppsFromDashboard": false,
+    "enableHomeApp": false
+  },
+  "driver_null": {
+    "enable": true
+  },
+  "dashboard": {
+    "enableDashboard": false
+  }
 }
-
-function ConvertTo-HeadlessSettingsText {
-    param([Parameter(Mandatory)][string]$InputText)
-
-    $settings = $InputText | ConvertFrom-Json
-    foreach ($sectionName in @('steamvr', 'driver_null', 'dashboard')) {
-        if ($null -eq $settings.PSObject.Properties[$sectionName]) {
-            $settings | Add-Member -MemberType NoteProperty -Name $sectionName -Value ([pscustomobject]@{})
-        }
-    }
-
-    Set-ObjectProperty -Object $settings.steamvr -Name 'requireHmd' -Value $false
-    Set-ObjectProperty -Object $settings.steamvr -Name 'forcedDriver' -Value 'null'
-    Set-ObjectProperty -Object $settings.steamvr -Name 'activateMultipleDrivers' -Value $false
-    Set-ObjectProperty -Object $settings.steamvr -Name 'startDashboardFromAppLaunch' -Value $false
-    Set-ObjectProperty -Object $settings.steamvr -Name 'startOverlayAppsFromDashboard' -Value $false
-    Set-ObjectProperty -Object $settings.steamvr -Name 'enableHomeApp' -Value $false
-    Set-ObjectProperty -Object $settings.driver_null -Name 'enable' -Value $true
-    Set-ObjectProperty -Object $settings.dashboard -Name 'enableDashboard' -Value $false
-
-    ($settings | ConvertTo-Json -Depth 100) + [Environment]::NewLine
+'@
 }
 
 function Get-TemporaryChaperoneText {
@@ -67,19 +52,14 @@ function Get-OpenVrEnvironment {
 
 function Initialize-PrivateHeadlessConfiguration {
     param(
-        [Parameter(Mandatory)][string]$SourceConfigRoot,
         [Parameter(Mandatory)][string]$PrivateConfigRoot,
         [Parameter(Mandatory)][string]$PrivateLogRoot
     )
 
-    $sourceSettingsPath = ConvertTo-FullPath (Join-Path $SourceConfigRoot 'steamvr.vrsettings')
     $privateSettingsPath = ConvertTo-FullPath (Join-Path $PrivateConfigRoot 'steamvr.vrsettings')
     $privateChaperonePath = ConvertTo-FullPath (Join-Path $PrivateConfigRoot 'chaperone_info.vrchap')
 
-    $sourceSettings = [System.IO.File]::ReadAllText($sourceSettingsPath)
-    $headlessSettings = ConvertTo-HeadlessSettingsText -InputText $sourceSettings
-
     New-Item -ItemType Directory -Path $PrivateConfigRoot, $PrivateLogRoot -Force | Out-Null
-    [System.IO.File]::WriteAllText($privateSettingsPath, $headlessSettings, [System.Text.UTF8Encoding]::new($false))
+    [System.IO.File]::WriteAllText($privateSettingsPath, (Get-HeadlessSettingsText), [System.Text.UTF8Encoding]::new($false))
     [System.IO.File]::WriteAllText($privateChaperonePath, (Get-TemporaryChaperoneText), [System.Text.UTF8Encoding]::new($false))
 }

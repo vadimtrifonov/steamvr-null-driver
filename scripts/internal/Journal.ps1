@@ -76,10 +76,10 @@ function Read-RunConfiguration {
     if ((Split-Path -Leaf $RunDirectory) -cne [string]$stored.runId) {
         throw 'The run configuration ID does not match its directory.'
     }
-    if ([int]$stored.schemaVersion -ne 4) {
+    if ([int]$stored.schemaVersion -ne 5) {
         throw 'The run configuration has an unsupported schema version.'
     }
-    foreach ($name in @('createdUtc', 'deadlineUtc', 'startupTimeoutSeconds', 'steamRoot', 'steamVrRoot')) {
+    foreach ($name in @('createdUtc', 'deadlineUtc', 'startupTimeoutSeconds', 'steamVrRoot')) {
         if (-not [string]$stored.$name) {
             throw "The run configuration is missing '$name'."
         }
@@ -95,17 +95,14 @@ function Read-RunConfiguration {
         throw 'The run startup timeout is outside the supported range.'
     }
 
-    $steamRoot = ConvertTo-FullPath ([string]$stored.steamRoot)
     $steamVrRoot = ConvertTo-FullPath ([string]$stored.steamVrRoot)
     [pscustomobject][ordered]@{
-        schemaVersion = 4
+        schemaVersion = 5
         runId = [string]$stored.runId
         createdUtc = $createdUtc.ToString('o')
         deadlineUtc = $deadlineUtc.ToString('o')
         startupTimeoutSeconds = $startupTimeoutSeconds
-        steamRoot = $steamRoot
         steamVrRoot = $steamVrRoot
-        sourceConfigRoot = ConvertTo-FullPath (Join-Path $steamRoot 'config')
         privateConfigRoot = ConvertTo-FullPath (Join-Path $RunDirectory 'config')
         privateLogRoot = ConvertTo-FullPath (Join-Path $RunDirectory 'logs')
         vrStartupPath = ConvertTo-FullPath (Join-Path $steamVrRoot 'bin\win64\vrstartup.exe')

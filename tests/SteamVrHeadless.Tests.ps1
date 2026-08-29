@@ -26,19 +26,17 @@ function Complete-Test {
 function New-FixtureRunConfiguration {
     param(
         [Parameter(Mandatory)][string]$RunId,
-        [Parameter(Mandatory)][string]$SteamRoot,
         [Parameter(Mandatory)][string]$SteamVrRoot,
         [DateTime]$CreatedUtc = [DateTime]::UtcNow,
         [DateTime]$DeadlineUtc = [DateTime]::UtcNow.AddMinutes(10)
     )
 
     [pscustomobject][ordered]@{
-        schemaVersion = 4
+        schemaVersion = 5
         runId = $RunId
         createdUtc = $CreatedUtc.ToString('o')
         deadlineUtc = $DeadlineUtc.ToString('o')
         startupTimeoutSeconds = 15
-        steamRoot = $SteamRoot
         steamVrRoot = $SteamVrRoot
     }
 }
@@ -56,29 +54,21 @@ function Write-FixtureRunConfiguration {
 try {
     New-Item -ItemType Directory -Path $testRoot -Force | Out-Null
 
-    $inputSettings = @'
-{
-  "steamvr": {
-    "requireHmd": true,
-    "forcedDriver": "future_hmd",
-    "activateMultipleDrivers": true,
-    "preserveMe": 42
-  },
-  "unrelated": {
-    "value": "kept"
-  }
-}
-'@
-    $headlessText = & $module { param($Text) ConvertTo-HeadlessSettingsText -InputText $Text } $inputSettings
+    $headlessText = & $module { Get-HeadlessSettingsText }
     $headless = $headlessText | ConvertFrom-Json
+    Assert-Equal @($headless.PSObject.Properties).Count 3 'The generated settings contain an unexpected top-level section.'
     Assert-Equal $headless.steamvr.requireHmd $false 'requireHmd was not disabled.'
     Assert-Equal $headless.steamvr.forcedDriver 'null' 'The null driver was not forced.'
     Assert-Equal $headless.steamvr.activateMultipleDrivers $false 'Multiple drivers were not disabled.'
+    Assert-Equal $headless.steamvr.startDashboardFromAppLaunch $false 'Dashboard startup was not disabled.'
+    Assert-Equal $headless.steamvr.startOverlayAppsFromDashboard $false 'Dashboard overlay startup was not disabled.'
+    Assert-Equal $headless.steamvr.enableHomeApp $false 'SteamVR Home was not disabled.'
     Assert-Equal $headless.driver_null.enable $true 'The null driver was not enabled.'
     Assert-Equal $headless.dashboard.enableDashboard $false 'The dashboard was not disabled.'
-    Assert-Equal $headless.steamvr.preserveMe 42 'An unrelated SteamVR setting changed.'
-    Assert-Equal $headless.unrelated.value 'kept' 'An unrelated section changed.'
-    Complete-Test 'headless settings transformation'
+    foreach ($section in @('LastKnown', 'audio', 'collisionBounds')) {
+        Assert-True ($null -eq $headless.PSObject.Properties[$section]) "The generated settings contain '$section'."
+    }
+    Complete-Test 'minimal headless settings generation'
 
     $futureUtc = [DateTime]::UtcNow.AddMinutes(10)
     $deserializedUtc = ([pscustomobject]@{ value=$futureUtc.ToString('o') } | ConvertTo-Json | ConvertFrom-Json).value
@@ -134,13 +124,9 @@ Active HMD set to tomorrow_headset.Serial 1
     Complete-Test 'private log shared reader'
 
     $fakeSteam = Join-Path $testRoot 'Steam'
-    $fakeConfig = Join-Path $fakeSteam 'config'
     $fakeRuntime = Join-Path $fakeSteam 'steamapps\common\SteamVR'
     New-Item -ItemType Directory -Path (Join-Path $fakeRuntime 'bin\win64') -Force | Out-Null
-    New-Item -ItemType Directory -Path $fakeConfig -Force | Out-Null
     [System.IO.File]::WriteAllText((Join-Path $fakeRuntime 'bin\win64\vrstartup.exe'), '')
-    $settingsPath = Join-Path $fakeConfig 'steamvr.vrsettings'
-    [System.IO.File]::WriteAllText($settingsPath, '{"steamvr":{"preserveMe":42}}')
 
     $externalRuntime = Join-Path $testRoot 'SteamLibrary\steamapps\common\SteamVR'
     $secondExternalRuntime = Join-Path $testRoot 'SecondSteamLibrary\steamapps\common\SteamVR'
@@ -160,6 +146,9 @@ Active HMD set to tomorrow_headset.Serial 1
             $script:fixtureSteamVrRoots = @($FixtureExternalRuntime)
             $split = Resolve-SteamVrPaths
             $splitWithExplicitSteamRoot = Resolve-SteamVrPaths -SteamRoot $FixtureSteamRoot
+            $explicitRuntimeOnly = Resolve-SteamVrPaths `
+                -SteamRoot ($FixtureSteamRoot + '-missing') `
+                -SteamVrRoot $FixtureExternalRuntime
             $script:fixtureSteamVrRoots = @($FixtureExternalRuntime, $FixtureSecondExternalRuntime)
             $ambiguousRejected = $false
             try {
@@ -167,40 +156,43 @@ Active HMD set to tomorrow_headset.Serial 1
             } catch {
                 $ambiguousRejected = $true
             }
-            [pscustomobject]@{ combined=$combined;split=$split;splitWithExplicitSteamRoot=$splitWithExplicitSteamRoot;ambiguousRejected=$ambiguousRejected }
+            [pscustomobject]@{
+                combined = $combined
+                split = $split
+                splitWithExplicitSteamRoot = $splitWithExplicitSteamRoot
+                explicitRuntimeOnly = $explicitRuntimeOnly
+                ambiguousRejected = $ambiguousRejected
+            }
         } finally {
             Set-Item -Path Function:Get-RegisteredSteamRoots -Value $originalSteamRoots
             Set-Item -Path Function:Get-RegisteredSteamVrRoots -Value $originalSteamVrRoots
             Remove-Variable -Name fixtureSteamRoot, fixtureSteamVrRoots -Scope Script -ErrorAction SilentlyContinue
         }
     } $fakeSteam $externalRuntime $secondExternalRuntime
-    Assert-Equal $automaticDiscovery.combined.steamRoot ([IO.Path]::GetFullPath($fakeSteam)) 'Automatic discovery did not find the Steam root.'
     Assert-Equal $automaticDiscovery.combined.steamVrRoot ([IO.Path]::GetFullPath($fakeRuntime)) 'Automatic discovery did not find SteamVR under the Steam root.'
     Complete-Test 'automatic colocated SteamVR discovery'
-    Assert-Equal $automaticDiscovery.split.steamRoot ([IO.Path]::GetFullPath($fakeSteam)) 'Split-library discovery changed the Steam root.'
     Assert-Equal $automaticDiscovery.split.steamVrRoot ([IO.Path]::GetFullPath($externalRuntime)) 'Automatic discovery did not use the registered SteamVR library.'
     Assert-Equal $automaticDiscovery.splitWithExplicitSteamRoot.steamVrRoot ([IO.Path]::GetFullPath($externalRuntime)) 'An explicit Steam root changed SteamVR registration precedence.'
     Complete-Test 'automatic split-library SteamVR discovery'
+    Assert-Equal $automaticDiscovery.explicitRuntimeOnly.steamVrRoot ([IO.Path]::GetFullPath($externalRuntime)) 'An explicit SteamVR root required a Steam config tree.'
+    Complete-Test 'explicit SteamVR root needs no Steam config'
     Assert-True $automaticDiscovery.ambiguousRejected 'Automatic discovery selected one of multiple registered SteamVR installations.'
     Complete-Test 'ambiguous SteamVR discovery is refused'
 
     $privateFixtureRoot = Join-Path $testRoot 'private-fixture'
     $privateConfig = Join-Path $privateFixtureRoot 'config'
     $privateLogs = Join-Path $privateFixtureRoot 'logs'
-    $sourceSettingsHash = (Get-FileHash -LiteralPath $settingsPath -Algorithm SHA256).Hash
     & $module {
-        param($Source, $Config, $Logs)
-        Initialize-PrivateHeadlessConfiguration -SourceConfigRoot $Source -PrivateConfigRoot $Config -PrivateLogRoot $Logs
-    } $fakeConfig $privateConfig $privateLogs
+        param($Config, $Logs)
+        Initialize-PrivateHeadlessConfiguration -PrivateConfigRoot $Config -PrivateLogRoot $Logs
+    } $privateConfig $privateLogs
     $privateSettings = Get-Content -LiteralPath (Join-Path $privateConfig 'steamvr.vrsettings') -Raw | ConvertFrom-Json
     Assert-Equal $privateSettings.steamvr.forcedDriver 'null' 'The private settings did not force the null driver.'
-    Assert-Equal $privateSettings.steamvr.preserveMe 42 'The private settings did not preserve an unrelated value.'
-    Assert-Equal (Get-FileHash -LiteralPath $settingsPath -Algorithm SHA256).Hash $sourceSettingsHash 'Private configuration changed the source settings.'
-    Assert-True (-not (Test-Path -LiteralPath (Join-Path $fakeConfig 'chaperone_info.vrchap'))) 'Private configuration wrote chaperone data to the source config.'
+    Assert-Equal @($privateSettings.PSObject.Properties).Count 3 'Private initialization wrote non-minimal settings.'
     Assert-True (Test-Path -LiteralPath (Join-Path $privateConfig 'chaperone_info.vrchap')) 'Private configuration has no chaperone data.'
-    Assert-True (-not (Test-Path -LiteralPath (Join-Path $privateConfig 'appconfig.json'))) 'Private initialization copied source application metadata.'
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $privateConfig 'appconfig.json'))) 'Private initialization created application metadata before SteamVR ran.'
     Assert-True (Test-Path -LiteralPath $privateLogs -PathType Container) 'Private configuration did not create its log directory.'
-    Complete-Test 'private configuration leaves source settings unchanged'
+    Complete-Test 'private configuration is generated from constants'
 
     $processInfo = & $module {
         param($Path, $Config, $Logs)
@@ -213,8 +205,9 @@ Active HMD set to tomorrow_headset.Serial 1
     $journalRunId = [Guid]::NewGuid().ToString('N')
     $journalRun = Join-Path (Join-Path $testRoot 'journal-runs') $journalRunId
     New-Item -ItemType Directory -Path $journalRun -Force | Out-Null
-    $storedJournalConfiguration = New-FixtureRunConfiguration -RunId $journalRunId -SteamRoot $fakeSteam -SteamVrRoot $fakeRuntime
+    $storedJournalConfiguration = New-FixtureRunConfiguration -RunId $journalRunId -SteamVrRoot $fakeRuntime
     $journalConfiguration = Write-FixtureRunConfiguration -RunDirectory $journalRun -Configuration $storedJournalConfiguration
+    Assert-True ($null -eq $storedJournalConfiguration.PSObject.Properties['steamRoot']) 'The stored journal contains an unused Steam root.'
     Assert-True ($null -eq $storedJournalConfiguration.PSObject.Properties['privateConfigRoot']) 'The stored journal contains a derived private config path.'
     Assert-True ($null -eq $storedJournalConfiguration.PSObject.Properties['vrStartupPath']) 'The stored journal contains a derived startup path.'
     Assert-Equal $journalConfiguration.privateConfigRoot ([IO.Path]::GetFullPath((Join-Path $journalRun 'config'))) 'The journal did not derive its private config path.'
@@ -340,7 +333,7 @@ Active HMD set to tomorrow_headset.Serial 1
     $ownershipRun = Join-Path (Join-Path $ownershipState 'runs') $ownershipRunId
     $otherRun = Join-Path (Join-Path $ownershipState 'runs') $otherRunId
     New-Item -ItemType Directory -Path $ownershipRun, $otherRun -Force | Out-Null
-    $storedOwnershipConfiguration = New-FixtureRunConfiguration -RunId $ownershipRunId -SteamRoot $fakeSteam -SteamVrRoot $fakeRuntime -CreatedUtc ([DateTime]::UtcNow.AddMinutes(-1))
+    $storedOwnershipConfiguration = New-FixtureRunConfiguration -RunId $ownershipRunId -SteamVrRoot $fakeRuntime -CreatedUtc ([DateTime]::UtcNow.AddMinutes(-1))
     $ownershipConfiguration = Write-FixtureRunConfiguration -RunDirectory $ownershipRun -Configuration $storedOwnershipConfiguration
     New-Item -ItemType Directory -Path $ownershipConfiguration.privateConfigRoot -Force | Out-Null
     $ownershipMarker = Join-Path $ownershipConfiguration.privateConfigRoot 'marker.txt'
@@ -358,7 +351,7 @@ Active HMD set to tomorrow_headset.Serial 1
     $orderRunId = [Guid]::NewGuid().ToString('N')
     $orderRun = Join-Path (Join-Path $orderState 'runs') $orderRunId
     New-Item -ItemType Directory -Path $orderRun -Force | Out-Null
-    $storedOrderConfiguration = New-FixtureRunConfiguration -RunId $orderRunId -SteamRoot $fakeSteam -SteamVrRoot $fakeRuntime -CreatedUtc ([DateTime]::UtcNow.AddMinutes(-1))
+    $storedOrderConfiguration = New-FixtureRunConfiguration -RunId $orderRunId -SteamVrRoot $fakeRuntime -CreatedUtc ([DateTime]::UtcNow.AddMinutes(-1))
     $orderConfiguration = Write-FixtureRunConfiguration -RunDirectory $orderRun -Configuration $storedOrderConfiguration
     [pscustomobject]@{ runId=$orderRunId } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $orderState 'active-run.json') -Encoding utf8NoBOM
     & $module {
@@ -381,17 +374,15 @@ Active HMD set to tomorrow_headset.Serial 1
     Remove-Item -LiteralPath $stateRoot -Recurse -Force
     $badStartupPath = Join-Path $fakeRuntime 'bin\win64\vrstartup.exe'
     [System.IO.File]::WriteAllText($badStartupPath, 'not an executable')
-    $settingsHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $settingsPath).Hash
-    $startOutput = & $entryScript start -SteamRoot $fakeSteam -SteamVrRoot $fakeRuntime -StateRoot $stateRoot -StartupTimeoutSeconds 15 2>&1
+    $startOutput = & $entryScript start -SteamVrRoot $fakeRuntime -StateRoot $stateRoot -StartupTimeoutSeconds 15 2>&1
     Assert-Equal $LASTEXITCODE 1 'The invalid startup executable did not fail the detached run.'
     $startResult = ($startOutput -join "`n") | ConvertFrom-Json
     Assert-Equal $startResult.run.phase 'failed' 'The detached supervisor did not report a controlled failure.'
     Assert-True $startResult.run.cleanupComplete 'The detached supervisor did not complete cleanup.'
-    Assert-Equal (Get-FileHash -Algorithm SHA256 -LiteralPath $settingsPath).Hash $settingsHash 'The detached failure changed the source settings.'
-    Assert-True (-not (Test-Path -LiteralPath (Join-Path $fakeConfig 'chaperone_info.vrchap'))) 'The detached failure wrote chaperone data to the source config.'
     Assert-True ($startResult.run.environment.VR_CONFIG_PATH -match [regex]::Escape($startResult.runId)) 'The run did not report its private config environment.'
     $storedFailedRun = Get-Content -Raw -LiteralPath (Join-Path (Join-Path (Join-Path $stateRoot 'runs') $startResult.runId) 'run.json') | ConvertFrom-Json
     Assert-True ($null -eq $storedFailedRun.PSObject.Properties['supervisor']) 'The supervisor rewrote the immutable run configuration.'
+    Assert-True ($null -eq $storedFailedRun.PSObject.Properties['steamRoot']) 'The stored run configuration contains an unused Steam root.'
     Assert-True ($null -eq $storedFailedRun.PSObject.Properties['privateConfigRoot']) 'The stored run configuration contains a derived path.'
     Assert-True (-not (Test-Path -LiteralPath (Join-Path $stateRoot 'active-run.json'))) 'The detached failure left an active-run lock.'
     $supervisorDeadline = [DateTime]::UtcNow.AddSeconds(5)
@@ -410,8 +401,8 @@ Active HMD set to tomorrow_headset.Serial 1
     $staleOwnerRun = Join-Path (Join-Path $multipleState 'runs') $staleOwnerRunId
     $activeOwnerRun = Join-Path (Join-Path $multipleState 'runs') $activeOwnerRunId
     New-Item -ItemType Directory -Path $staleOwnerRun, $activeOwnerRun -Force | Out-Null
-    $staleOwnerConfiguration = New-FixtureRunConfiguration -RunId $staleOwnerRunId -SteamRoot $fakeSteam -SteamVrRoot $fakeRuntime -CreatedUtc ([DateTime]::UtcNow.AddMinutes(-1))
-    $activeOwnerConfiguration = New-FixtureRunConfiguration -RunId $activeOwnerRunId -SteamRoot $fakeSteam -SteamVrRoot $fakeRuntime
+    $staleOwnerConfiguration = New-FixtureRunConfiguration -RunId $staleOwnerRunId -SteamVrRoot $fakeRuntime -CreatedUtc ([DateTime]::UtcNow.AddMinutes(-1))
+    $activeOwnerConfiguration = New-FixtureRunConfiguration -RunId $activeOwnerRunId -SteamVrRoot $fakeRuntime
     $null = Write-FixtureRunConfiguration -RunDirectory $staleOwnerRun -Configuration $staleOwnerConfiguration
     $null = Write-FixtureRunConfiguration -RunDirectory $activeOwnerRun -Configuration $activeOwnerConfiguration
     [pscustomobject]@{ runId=$staleOwnerRunId;phase='configuring';cleanupComplete=$false } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $staleOwnerRun 'status.json') -Encoding utf8NoBOM
@@ -430,8 +421,7 @@ Active HMD set to tomorrow_headset.Serial 1
     $staleRunId = [Guid]::NewGuid().ToString('N')
     $staleRun = Join-Path (Join-Path $staleState 'runs') $staleRunId
     New-Item -ItemType Directory -Path $staleRun -Force | Out-Null
-    $staleHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $settingsPath).Hash
-    $storedStaleConfiguration = New-FixtureRunConfiguration -RunId $staleRunId -SteamRoot $fakeSteam -SteamVrRoot $fakeRuntime -CreatedUtc ([DateTime]::UtcNow.AddMinutes(-1))
+    $storedStaleConfiguration = New-FixtureRunConfiguration -RunId $staleRunId -SteamVrRoot $fakeRuntime -CreatedUtc ([DateTime]::UtcNow.AddMinutes(-1))
     $staleConfiguration = Write-FixtureRunConfiguration -RunDirectory $staleRun -Configuration $storedStaleConfiguration
     New-Item -ItemType Directory -Path $staleConfiguration.privateConfigRoot, $staleConfiguration.privateLogRoot -Force | Out-Null
     [System.IO.File]::WriteAllText((Join-Path $staleConfiguration.privateConfigRoot 'marker.txt'), 'private state')
@@ -462,7 +452,6 @@ Active HMD set to tomorrow_headset.Serial 1
         Assert-True $staleResult.ok 'Stale recovery did not report success.'
         $fakeVrProcess.Refresh()
         Assert-True $fakeVrProcess.HasExited 'Stale recovery left a runtime-root process alive.'
-        Assert-Equal (Get-FileHash -Algorithm SHA256 -LiteralPath $settingsPath).Hash $staleHash 'Stale recovery changed the source settings.'
         Assert-True (-not (Test-Path -LiteralPath (Join-Path $staleState 'active-run.json'))) 'Stale recovery left the active-run lock.'
         Assert-True (-not (Test-Path -LiteralPath $staleRun)) 'Stale recovery left the recovered run journal.'
     } finally {
@@ -489,7 +478,7 @@ Active HMD set to tomorrow_headset.Serial 1
     $handoffRunId = [Guid]::NewGuid().ToString('N')
     $handoffRun = Join-Path (Join-Path $handoffState 'runs') $handoffRunId
     New-Item -ItemType Directory -Path $handoffRun -Force | Out-Null
-    $handoffConfiguration = New-FixtureRunConfiguration -RunId $handoffRunId -SteamRoot $fakeSteam -SteamVrRoot $fakeRuntime
+    $handoffConfiguration = New-FixtureRunConfiguration -RunId $handoffRunId -SteamVrRoot $fakeRuntime
     $null = Write-FixtureRunConfiguration -RunDirectory $handoffRun -Configuration $handoffConfiguration
     [pscustomobject]@{ runId=$handoffRunId } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $handoffState 'active-run.json') -Encoding utf8NoBOM
     $handoffOutput = & $entryScript recover -StateRoot $handoffState 2>&1
@@ -503,7 +492,7 @@ Active HMD set to tomorrow_headset.Serial 1
     $preflightRunId = [Guid]::NewGuid().ToString('N')
     $preflightRun = Join-Path (Join-Path $preflightState 'runs') $preflightRunId
     New-Item -ItemType Directory -Path $preflightRun -Force | Out-Null
-    $preflightConfiguration = New-FixtureRunConfiguration -RunId $preflightRunId -SteamRoot $fakeSteam -SteamVrRoot $fakeRuntime -CreatedUtc ([DateTime]::UtcNow.AddMinutes(-1))
+    $preflightConfiguration = New-FixtureRunConfiguration -RunId $preflightRunId -SteamVrRoot $fakeRuntime -CreatedUtc ([DateTime]::UtcNow.AddMinutes(-1))
     $null = Write-FixtureRunConfiguration -RunDirectory $preflightRun -Configuration $preflightConfiguration
     [pscustomobject]@{ runId=$preflightRunId } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $preflightState 'active-run.json') -Encoding utf8NoBOM
     $preflightOutput = & $entryScript recover -StateRoot $preflightState 2>&1
@@ -548,22 +537,19 @@ Active HMD set to tomorrow_headset.Serial 1
     Assert-True (Test-Path -LiteralPath (Join-Path $malformedActiveState 'active-run.json')) 'Recovery removed the lock for a malformed active journal.'
     Complete-Test 'malformed active journal is refused'
 
-    [System.IO.File]::WriteAllText($settingsPath, '{"steamvr":{}}')
     $leaseState = Join-Path $testRoot 'lease-state'
     $leaseRunId = [Guid]::NewGuid().ToString('N')
     $leaseRun = Join-Path (Join-Path $leaseState 'runs') $leaseRunId
     New-Item -ItemType Directory -Path $leaseRun -Force | Out-Null
-    $leaseConfiguration = New-FixtureRunConfiguration -RunId $leaseRunId -SteamRoot $fakeSteam -SteamVrRoot $fakeRuntime -CreatedUtc ([DateTime]::UtcNow.AddMinutes(-2)) -DeadlineUtc ([DateTime]::UtcNow.AddMinutes(-1))
+    $leaseConfiguration = New-FixtureRunConfiguration -RunId $leaseRunId -SteamVrRoot $fakeRuntime -CreatedUtc ([DateTime]::UtcNow.AddMinutes(-2)) -DeadlineUtc ([DateTime]::UtcNow.AddMinutes(-1))
     $null = Write-FixtureRunConfiguration -RunDirectory $leaseRun -Configuration $leaseConfiguration
     [pscustomobject]@{ runId=$leaseRunId } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $leaseState 'active-run.json') -Encoding utf8NoBOM
-    $leaseSettingsHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $settingsPath).Hash
     $leaseSupervisor = & $module { Get-CurrentProcessRecord }
     [pscustomobject]@{ supervisor=$leaseSupervisor } | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $leaseRun 'launch.json') -Encoding utf8NoBOM
     Invoke-SteamVrHeadlessSupervisor -RunId $leaseRunId -StateRoot $leaseState
     $leaseStatus = Get-Content -Raw -LiteralPath (Join-Path $leaseRun 'status.json') | ConvertFrom-Json
     Assert-Equal $leaseStatus.phase 'expired' 'An expired lease entered normal startup.'
     Assert-True $leaseStatus.cleanupComplete 'An expired pre-start lease did not clean its journal state.'
-    Assert-Equal (Get-FileHash -Algorithm SHA256 -LiteralPath $settingsPath).Hash $leaseSettingsHash 'An expired pre-start lease changed settings bytes.'
     Assert-True (-not (Test-Path -LiteralPath (Join-Path $leaseState 'active-run.json'))) 'An expired pre-start lease left its active lock.'
     Complete-Test 'lease is a hard startup deadline'
 

@@ -10,24 +10,14 @@ function Invoke-SteamVrHeadlessCheck {
         $paths = Resolve-SteamVrPaths -SteamRoot $SteamRoot -SteamVrRoot $SteamVrRoot
         $processes = @(Get-SteamVrRuntimeProcesses -SteamVrRoot $paths.steamVrRoot)
         $active = Get-ActiveRunRecord -StateRoot $StateRoot
-        $settingsValid = $false
-        $settingsError = $null
-        try {
-            $null = [System.IO.File]::ReadAllText($paths.sourceSettingsPath) | ConvertFrom-Json
-            $settingsValid = $true
-        } catch {
-            $settingsError = $_.Exception.Message
-        }
 
         [pscustomobject]@{
             ok = $true
             action = 'check'
-            canStart = $settingsValid -and $processes.Count -eq 0 -and $null -eq $active
+            canStart = $processes.Count -eq 0 -and $null -eq $active
             paths = $paths
             activeRun = $active
             runtimeProcesses = $processes
-            settingsValid = $settingsValid
-            settingsError = $settingsError
             invariant = [pscustomobject]@{
                 expectedDriver = 'null'
                 compositorRequired = $true
@@ -97,7 +87,7 @@ function Start-SteamVrHeadlessRun {
         return [pscustomobject]@{
             ok = $false
             action = 'start'
-            error = 'Preflight rejected the start. SteamVR must be stopped, no active run may exist, and the source settings file must be valid JSON.'
+            error = 'Preflight rejected the start. SteamVR must be stopped and no active run may exist.'
             check = $check
         }
     }
@@ -108,12 +98,11 @@ function Start-SteamVrHeadlessRun {
     $createdUtc = [DateTime]::UtcNow
     $deadlineUtc = $createdUtc.AddMinutes($MaxDurationMinutes)
     $configuration = [ordered]@{
-        schemaVersion = 4
+        schemaVersion = 5
         runId = $runId
         createdUtc = $createdUtc.ToString('o')
         deadlineUtc = $deadlineUtc.ToString('o')
         startupTimeoutSeconds = $StartupTimeoutSeconds
-        steamRoot = $check.paths.steamRoot
         steamVrRoot = $check.paths.steamVrRoot
     }
     Write-JsonAtomic -Path (Join-Path $runDirectory 'run.json') -Value $configuration

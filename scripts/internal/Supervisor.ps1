@@ -55,7 +55,6 @@ function Invoke-SteamVrHeadlessSupervisor {
 
         Write-RunStatus -RunDirectory $runDirectory -RunId $RunId -Phase 'configuring' -Message 'Creating an isolated null-driver configuration.' -State $state | Out-Null
         $null = Initialize-PrivateHeadlessConfiguration `
-            -SourceConfigRoot $configuration.sourceConfigRoot `
             -PrivateConfigRoot $configuration.privateConfigRoot `
             -PrivateLogRoot $configuration.privateLogRoot
         if (@(Get-SteamVrRuntimeProcesses -SteamVrRoot $configuration.steamVrRoot).Count -gt 0) {

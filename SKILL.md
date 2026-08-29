@@ -16,16 +16,16 @@ Use one Windows account and one state root for commands that target the same Ste
 
 Headless means that SteamVR uses its bundled `null` HMD. A compositor, a GPU, and an interactive Windows session remain necessary.
 
-Each run copies the source `steamvr.vrsettings` file into its run directory. The helper changes only this private copy.
+Each run generates a minimal `steamvr.vrsettings` file in its run directory. It contains only the null-driver and dashboard overrides required by this helper.
 
-SteamVR creates its run-specific application configuration under the private config path.
+SteamVR can add run-specific settings and application metadata under the private config path. These additions remain private to the run.
 
 The run also has private chaperone data and private SteamVR logs. The helper starts SteamVR with these environment variables:
 
 - `VR_CONFIG_PATH`
 - `VR_LOG_PATH`
 
-The normal SteamVR configuration remains available as the source. The helper does not change its settings or chaperone files.
+The helper does not read or change the normal SteamVR settings or chaperone files.
 
 Existing Steam processes can still update their own global client logs and Steam metadata. These Steam-owned changes are outside this contract.
 
@@ -79,9 +79,7 @@ Competing start commands fail safely. Stop and recover commands require serializ
 
 ## Installation discovery
 
-The helper finds the Steam client root from the Valve Steam registry entries.
-
-It finds SteamVR from the Steam App 250820 registration. If that registration is unavailable, it examines the default library under the Steam root.
+The helper finds SteamVR from the Steam App 250820 registration. If that registration is unavailable, it finds the Steam client from the Valve registry entries and examines its default library.
 
 Automatic discovery supports these layouts:
 
@@ -90,16 +88,14 @@ Automatic discovery supports these layouts:
 
 ### Discovery limits
 
-- Automatic discovery supports one Steam client and one SteamVR installation.
-- The source settings file must be `<Steam-root>\config\steamvr.vrsettings`.
+- Automatic discovery supports one SteamVR installation.
 - A split-library installation requires a valid Steam App 250820 registration.
-- Custom OpenVR source-configuration paths are outside this contract.
+- `-SteamRoot` affects only the colocated fallback.
 
-Supply explicit paths if discovery is unavailable or ambiguous:
+Supply the runtime path if discovery is unavailable or ambiguous:
 
 ```powershell
 pwsh -NoProfile -File scripts/steamvr-headless.ps1 check `
-  -SteamRoot "<Steam-client-root>" `
   -SteamVrRoot "<SteamVR-root>"
 ```
 
