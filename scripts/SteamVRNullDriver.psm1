@@ -17,9 +17,9 @@ foreach ($file in @(
 }
 
 Export-ModuleMember -Function @(
-    'Invoke-SteamVrHeadlessCheck',
-    'Start-SteamVrHeadlessRun',
-    'Get-SteamVrHeadlessStatus',
-    'Stop-SteamVrHeadlessRun',
-    'Invoke-SteamVrHeadlessSupervisor'
+    'Invoke-SteamVRNullDriverCheck',
+    'Start-SteamVRNullDriverRun',
+    'Get-SteamVRNullDriverStatus',
+    'Stop-SteamVRNullDriverRun',
+    'Invoke-SteamVRNullDriverSupervisor'
 )

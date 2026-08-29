@@ -1,14 +1,14 @@
-function Invoke-SteamVrHeadlessCheck {
+function Invoke-SteamVRNullDriverCheck {
     [CmdletBinding()]
     param(
-        [string]$SteamVrRoot,
+        [string]$SteamVRRoot,
         [Parameter(Mandatory)][string]$StateRoot
     )
 
     try {
-        $resolvedSteamVrRoot = Resolve-SteamVrRoot -SteamVrRoot $SteamVrRoot
+        $resolvedSteamVRRoot = Resolve-SteamVRRoot -SteamVRRoot $SteamVRRoot
         $steamProcesses = @(Get-SteamClientProcesses)
-        $runtimeProcesses = @(Get-SteamVrRuntimeProcesses -SteamVrRoot $resolvedSteamVrRoot)
+        $runtimeProcesses = @(Get-SteamVRRuntimeProcesses -SteamVRRoot $resolvedSteamVRRoot)
         $active = Get-ActiveRunRecord -StateRoot $StateRoot
         $inactiveRuns = @(Get-InactiveRunRecords -StateRoot $StateRoot -ActiveRun $active)
 
@@ -16,7 +16,7 @@ function Invoke-SteamVrHeadlessCheck {
             ok = $true
             action = 'check'
             canStart = $steamProcesses.Count -gt 0 -and $runtimeProcesses.Count -eq 0 -and $null -eq $active
-            steamVrRoot = $resolvedSteamVrRoot
+            steamVRRoot = $resolvedSteamVRRoot
             steamProcesses = $steamProcesses
             activeRun = $active
             inactiveRuns = $inactiveRuns
@@ -31,16 +31,16 @@ function Invoke-SteamVrHeadlessCheck {
     }
 }
 
-function Start-SteamVrHeadlessRun {
+function Start-SteamVRNullDriverRun {
     [CmdletBinding()]
     param(
-        [string]$SteamVrRoot,
+        [string]$SteamVRRoot,
         [Parameter(Mandatory)][string]$StateRoot,
         [Parameter(Mandatory)][string]$SupervisorScriptPath,
         [ValidateRange(1, 120)][int]$MaxDurationMinutes = 30
     )
 
-    $check = Invoke-SteamVrHeadlessCheck -SteamVrRoot $SteamVrRoot -StateRoot $StateRoot
+    $check = Invoke-SteamVRNullDriverCheck -SteamVRRoot $SteamVRRoot -StateRoot $StateRoot
     if (-not $check.ok) {
         return [pscustomobject]@{ ok=$false; action='start'; error=$check.error; check=$check }
     }
@@ -55,27 +55,23 @@ function Start-SteamVrHeadlessRun {
 
     $runId = [Guid]::NewGuid().ToString('N')
     $runDirectory = Get-RunDirectory -StateRoot $StateRoot -RunId $runId
-    New-Item -ItemType Directory -Path $runDirectory -Force | Out-Null
     $createdUtc = [DateTime]::UtcNow
     $deadlineUtc = $createdUtc.AddMinutes($MaxDurationMinutes)
     $configuration = [ordered]@{
-        schemaVersion = 5
+        schemaVersion = 6
         runId = $runId
         createdUtc = $createdUtc.ToString('o')
         deadlineUtc = $deadlineUtc.ToString('o')
-        steamVrRoot = $check.steamVrRoot
+        steamVRRoot = $check.steamVRRoot
     }
-    Write-JsonAtomic -Path (Join-Path $runDirectory 'run.json') -Value $configuration
 
     $lockAcquired = $false
     $spawned = $false
     try {
+        New-Item -ItemType Directory -Path $runDirectory -Force | Out-Null
+        Write-JsonAtomic -Path (Join-Path $runDirectory 'run.json') -Value $configuration
         New-ActiveRunRecord -StateRoot $StateRoot -RunId $runId
         $lockAcquired = $true
-        Remove-InactiveRunDirectories `
-            -StateRoot $StateRoot `
-            -ActiveRunId $runId `
-            -ActiveRunDirectory $runDirectory
         Start-DetachedSupervisor -SupervisorScriptPath $SupervisorScriptPath -RunId $runId -StateRoot $StateRoot
         $spawned = $true
     } catch {
@@ -95,7 +91,6 @@ function Start-SteamVrHeadlessRun {
                 }
                 if ($canRemoveRunDirectory) {
                     Remove-Item -LiteralPath $runDirectory -Recurse -Force -ErrorAction SilentlyContinue
-                    Remove-EmptyStateDirectories -StateRoot $StateRoot
                 }
             } catch {
                 $cleanupError = $_.Exception.Message
@@ -104,7 +99,16 @@ function Start-SteamVrHeadlessRun {
         if ($cleanupError) {
             $startError = "$startError Pre-start cleanup also failed: $cleanupError"
         }
-        return [pscustomobject]@{ ok=$false; action='start'; runId=$runId; error=$startError }
+        $runStateRemoved = $false
+        try {
+            $runStateRemoved = -not (Test-Path -LiteralPath $runDirectory)
+        } catch {}
+        $failure = [ordered]@{ ok=$false; action='start' }
+        if (-not $runStateRemoved) {
+            $failure.runId = $runId
+        }
+        $failure.error = $startError
+        return [pscustomobject]$failure
     }
 
     $clientDeadline = $createdUtc.AddSeconds($script:StartupTimeoutSeconds + 20)
@@ -131,6 +135,23 @@ function Start-SteamVrHeadlessRun {
         }
         $ownsActiveLock = $null -ne $currentActive -and [string]$currentActive.runId -ceq $runId
         if ($status -and [string]$status.phase -eq 'ready' -and $ownsActiveLock) {
+            try {
+                $supervisor = Get-StatusSupervisor -RunStatus $status
+                if ($null -eq $supervisor) {
+                    throw 'The ready run status has no supervisor identity.'
+                }
+                if (-not (Get-SupervisorAlive -Supervisor $supervisor)) {
+                    return [pscustomobject]@{
+                        ok = $false
+                        action = 'start'
+                        runId = $runId
+                        error = 'The supervisor exited before the start command completed. Use stop with this run ID.'
+                        run = $status
+                    }
+                }
+            } catch {
+                return [pscustomobject]@{ ok=$false; action='start'; runId=$runId; error=$_.Exception.Message; run=$status }
+            }
             return [pscustomobject]@{ ok=$true; action='start'; runId=$runId; run=$status }
         }
         if ($status -and (Test-RunPhaseTerminal -Phase ([string]$status.phase))) {
@@ -152,7 +173,7 @@ function Start-SteamVrHeadlessRun {
     }
 }
 
-function Get-SteamVrHeadlessStatus {
+function Get-SteamVRNullDriverStatus {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][string]$RunId,
@@ -173,7 +194,7 @@ function Get-SteamVrHeadlessStatus {
         $supervisor = if ($isActive) { Get-StatusSupervisor -RunStatus $runStatus } else { $null }
         $supervisorAlive = if ($isActive) { Get-SupervisorAlive -Supervisor $supervisor } else { $false }
         $runtimeProcesses = if ($isActive) {
-            @(Get-SteamVrRuntimeProcesses -SteamVrRoot $configuration.steamVrRoot)
+            @(Get-SteamVRRuntimeProcesses -SteamVRRoot $configuration.steamVRRoot)
         } else {
             @()
         }
@@ -191,7 +212,7 @@ function Get-SteamVrHeadlessStatus {
     }
 }
 
-function Stop-SteamVrHeadlessRun {
+function Stop-SteamVRNullDriverRun {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][string]$RunId,
@@ -212,12 +233,10 @@ function Stop-SteamVrHeadlessRun {
                 try { $priorStatus = Read-JsonShared -Path $statusPath } catch {}
             }
             Remove-Item -LiteralPath $runDirectory -Recurse -Force
-            Remove-EmptyStateDirectories -StateRoot $StateRoot
             return [pscustomobject]@{
                 ok = $true
                 action = 'stop'
                 runId = $RunId
-                result = 'removed retained private run state'
                 run = $priorStatus
                 error = $null
             }
@@ -297,7 +316,7 @@ function Stop-SteamVrHeadlessRun {
         $ownsActiveLock = $null -ne $currentActive -and [string]$currentActive.runId -ceq $RunId
         $runtimeStopped = $false
         if (-not $ownsActiveLock) {
-            $runtimeStopped = @(Get-SteamVrRuntimeProcesses -SteamVrRoot $configuration.steamVrRoot).Count -eq 0
+            $runtimeStopped = @(Get-SteamVRRuntimeProcesses -SteamVRRoot $configuration.steamVRRoot).Count -eq 0
         }
         $ok = -not $ownsActiveLock -and $runtimeStopped
         $error = if ($ok) {
@@ -312,7 +331,6 @@ function Stop-SteamVrHeadlessRun {
         $result = [pscustomobject]@{ ok=$ok; action='stop'; runId=$RunId; run=$status; error=$error }
         if ($ok) {
             Remove-Item -LiteralPath $runDirectory -Recurse -Force
-            Remove-EmptyStateDirectories -StateRoot $StateRoot
         }
         $result
     } catch {

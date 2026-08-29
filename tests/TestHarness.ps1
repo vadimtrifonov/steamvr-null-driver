@@ -1,4 +1,4 @@
-$global:SteamVrHeadlessPassedTests = [System.Collections.Generic.List[string]]::new()
+$global:SteamVRNullDriverPassedTests = [System.Collections.Generic.List[string]]::new()
 
 function Assert-True {
     param(
@@ -40,23 +40,23 @@ function Assert-PropertySet {
 function Complete-Test {
     param([Parameter(Mandatory)][string]$Name)
 
-    $global:SteamVrHeadlessPassedTests.Add($Name)
+    $global:SteamVRNullDriverPassedTests.Add($Name)
 }
 
 function New-FixtureRunConfiguration {
     param(
         [Parameter(Mandatory)][string]$RunId,
-        [Parameter(Mandatory)][string]$SteamVrRoot,
+        [Parameter(Mandatory)][string]$SteamVRRoot,
         [DateTime]$CreatedUtc = [DateTime]::UtcNow,
         [DateTime]$DeadlineUtc = [DateTime]::UtcNow.AddMinutes(10)
     )
 
     [pscustomobject][ordered]@{
-        schemaVersion = 5
+        schemaVersion = 6
         runId = $RunId
         createdUtc = $CreatedUtc.ToString('o')
         deadlineUtc = $DeadlineUtc.ToString('o')
-        steamVrRoot = $SteamVrRoot
+        steamVRRoot = $SteamVRRoot
     }
 }
 
@@ -73,7 +73,7 @@ function Write-FixtureRunConfiguration {
     & $Module { param($Run) Read-RunConfiguration -RunDirectory $Run } $RunDirectory
 }
 
-function New-FixtureSteamVrRuntime {
+function New-FixtureSteamVRRuntime {
     param([Parameter(Mandatory)][string]$Root)
 
     foreach ($relativePath in @(

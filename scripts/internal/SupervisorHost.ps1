@@ -5,6 +5,6 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$modulePath = Join-Path (Split-Path -Parent $PSScriptRoot) 'SteamVrHeadless.psm1'
+$modulePath = Join-Path (Split-Path -Parent $PSScriptRoot) 'SteamVRNullDriver.psm1'
 Import-Module -Name $modulePath -Force
-Invoke-SteamVrHeadlessSupervisor -RunId $RunId -StateRoot $StateRoot
+Invoke-SteamVRNullDriverSupervisor -RunId $RunId -StateRoot $StateRoot

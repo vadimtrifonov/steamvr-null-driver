@@ -66,10 +66,10 @@ function Read-RunConfiguration {
     if ((Split-Path -Leaf $RunDirectory) -cne [string]$stored.runId) {
         throw 'The run configuration ID does not match its directory.'
     }
-    if ([int]$stored.schemaVersion -ne 5) {
+    if ([int]$stored.schemaVersion -ne 6) {
         throw 'The run configuration has an unsupported schema version.'
     }
-    foreach ($name in @('createdUtc', 'deadlineUtc', 'steamVrRoot')) {
+    foreach ($name in @('createdUtc', 'deadlineUtc', 'steamVRRoot')) {
         if (-not [string]$stored.$name) {
             throw "The run configuration is missing '$name'."
         }
@@ -81,16 +81,16 @@ function Read-RunConfiguration {
         throw 'The run deadline must be later than its creation time.'
     }
 
-    $steamVrRoot = ConvertTo-FullPath ([string]$stored.steamVrRoot)
+    $steamVRRoot = ConvertTo-FullPath ([string]$stored.steamVRRoot)
     [pscustomobject][ordered]@{
-        schemaVersion = 5
+        schemaVersion = 6
         runId = [string]$stored.runId
         createdUtc = $createdUtc.ToString('o')
         deadlineUtc = $deadlineUtc.ToString('o')
-        steamVrRoot = $steamVrRoot
+        steamVRRoot = $steamVRRoot
         privateConfigRoot = ConvertTo-FullPath (Join-Path $RunDirectory 'config')
         privateLogRoot = ConvertTo-FullPath (Join-Path $RunDirectory 'logs')
-        vrStartupPath = ConvertTo-FullPath (Join-Path $steamVrRoot 'bin\win64\vrstartup.exe')
+        vrStartupPath = ConvertTo-FullPath (Join-Path $steamVRRoot 'bin\win64\vrstartup.exe')
     }
 }
 
@@ -141,16 +141,23 @@ function New-ActiveRunRecord {
     )
 
     Assert-RunId -RunId $RunId
-    New-Item -ItemType Directory -Path $StateRoot -Force | Out-Null
     $path = Join-Path $StateRoot 'active-run.json'
+    $temporaryPath = Join-Path (Get-RunDirectory -StateRoot $StateRoot -RunId $RunId) 'active-run.tmp'
     $json = @{ runId=$RunId } | ConvertTo-Json
     $bytes = [System.Text.UTF8Encoding]::new($false).GetBytes($json)
-    $stream = [System.IO.File]::Open($path, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+
     try {
-        $stream.Write($bytes, 0, $bytes.Length)
-        $stream.Flush($true)
-    } finally {
-        $stream.Dispose()
+        $stream = [System.IO.File]::Open($temporaryPath, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+        try {
+            $stream.Write($bytes, 0, $bytes.Length)
+            $stream.Flush($true)
+        } finally {
+            $stream.Dispose()
+        }
+        [System.IO.File]::Move($temporaryPath, $path)
+    } catch {
+        Remove-Item -LiteralPath $temporaryPath -Force -ErrorAction SilentlyContinue
+        throw
     }
 }
 
@@ -171,20 +178,6 @@ function Remove-ActiveRunRecord {
     }
     Remove-Item -LiteralPath $path -Force
     -not (Test-Path -LiteralPath $path)
-}
-
-function Remove-EmptyStateDirectories {
-    param([Parameter(Mandatory)][string]$StateRoot)
-
-    $runsRoot = Join-Path $StateRoot 'runs'
-    if ((Test-Path -LiteralPath $runsRoot -PathType Container) -and
-        @(Get-ChildItem -LiteralPath $runsRoot -Force).Count -eq 0) {
-        Remove-Item -LiteralPath $runsRoot -Force
-    }
-    if ((Test-Path -LiteralPath $StateRoot -PathType Container) -and
-        @(Get-ChildItem -LiteralPath $StateRoot -Force).Count -eq 0) {
-        Remove-Item -LiteralPath $StateRoot -Force
-    }
 }
 
 function Get-InactiveRunRecords {
@@ -224,28 +217,4 @@ function Get-InactiveRunRecords {
             [pscustomobject]$record
         }
     )
-}
-
-function Remove-InactiveRunDirectories {
-    param(
-        [Parameter(Mandatory)][string]$StateRoot,
-        [Parameter(Mandatory)][string]$ActiveRunId,
-        [Parameter(Mandatory)][string]$ActiveRunDirectory
-    )
-
-    $null = Assert-ActiveRunOwnership `
-        -StateRoot $StateRoot `
-        -RunId $ActiveRunId `
-        -RunDirectory $ActiveRunDirectory
-    $runsRoot = Join-Path $StateRoot 'runs'
-    if (-not (Test-Path -LiteralPath $runsRoot -PathType Container)) {
-        return @()
-    }
-
-    foreach ($directory in @(Get-ChildItem -LiteralPath $runsRoot -Directory -Force)) {
-        if ($directory.Name -ceq $ActiveRunId) {
-            continue
-        }
-        Remove-Item -LiteralPath $directory.FullName -Recurse -Force -ErrorAction Stop
-    }
 }

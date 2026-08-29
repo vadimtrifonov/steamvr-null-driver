@@ -6,18 +6,18 @@ $module = $Context.Module
 $discovery = & $module {
     param($FixtureRoot, $SecondFixtureRoot)
 
-    $original = (Get-Command Get-RegisteredSteamVrRoots -CommandType Function).ScriptBlock
-    $script:fixtureSteamVrRoots = @($FixtureRoot)
-    Set-Item -Path Function:Get-RegisteredSteamVrRoots -Value {
-        @($script:fixtureSteamVrRoots)
+    $original = (Get-Command Get-RegisteredSteamVRRoots -CommandType Function).ScriptBlock
+    $script:fixtureSteamVRRoots = @($FixtureRoot)
+    Set-Item -Path Function:Get-RegisteredSteamVRRoots -Value {
+        @($script:fixtureSteamVRRoots)
     }
     try {
-        $registered = Resolve-SteamVrRoot
-        $explicit = Resolve-SteamVrRoot -SteamVrRoot $FixtureRoot
-        $script:fixtureSteamVrRoots = @($FixtureRoot, $SecondFixtureRoot)
+        $registered = Resolve-SteamVRRoot
+        $explicit = Resolve-SteamVRRoot -SteamVRRoot $FixtureRoot
+        $script:fixtureSteamVRRoots = @($FixtureRoot, $SecondFixtureRoot)
         $ambiguousRejected = $false
         try {
-            $null = Resolve-SteamVrRoot
+            $null = Resolve-SteamVRRoot
         } catch {
             $ambiguousRejected = $true
         }
@@ -27,13 +27,13 @@ $discovery = & $module {
             ambiguousRejected = $ambiguousRejected
         }
     } finally {
-        Set-Item -Path Function:Get-RegisteredSteamVrRoots -Value $original
-        Remove-Variable -Name fixtureSteamVrRoots -Scope Script -ErrorAction SilentlyContinue
+        Set-Item -Path Function:Get-RegisteredSteamVRRoots -Value $original
+        Remove-Variable -Name fixtureSteamVRRoots -Scope Script -ErrorAction SilentlyContinue
     }
-} $Context.SteamVrRoot $Context.SecondSteamVrRoot
-Assert-Equal $discovery.registered ([IO.Path]::GetFullPath($Context.SteamVrRoot)) 'Registered discovery selected the wrong SteamVR root.'
+} $Context.SteamVRRoot $Context.SecondSteamVRRoot
+Assert-Equal $discovery.registered ([IO.Path]::GetFullPath($Context.SteamVRRoot)) 'Registered discovery selected the wrong SteamVR root.'
 Complete-Test 'registered SteamVR root is resolved'
-Assert-Equal $discovery.explicit ([IO.Path]::GetFullPath($Context.SteamVrRoot)) 'Explicit discovery changed the selected SteamVR root.'
+Assert-Equal $discovery.explicit ([IO.Path]::GetFullPath($Context.SteamVRRoot)) 'Explicit discovery changed the selected SteamVR root.'
 Complete-Test 'explicit SteamVR root is resolved'
 Assert-True $discovery.ambiguousRejected 'Registered discovery selected one of multiple complete SteamVR roots.'
 Complete-Test 'ambiguous registered roots require explicit selection'
@@ -43,7 +43,7 @@ New-Item -ItemType Directory -Path (Join-Path $incompleteRuntime 'bin\win64') -F
 [System.IO.File]::WriteAllText((Join-Path $incompleteRuntime 'bin\win64\vrstartup.exe'), '')
 $incompleteRejected = $false
 try {
-    $null = & $module { param($Root) Resolve-SteamVrRoot -SteamVrRoot $Root } $incompleteRuntime
+    $null = & $module { param($Root) Resolve-SteamVRRoot -SteamVRRoot $Root } $incompleteRuntime
 } catch {
     $incompleteRejected = $true
 }
@@ -63,10 +63,10 @@ foreach ($relativePath in @(
 $layoutResult = & $module {
     param($Root)
 
-    Assert-SteamVrCleanupLayout -SteamVrRoot $Root
+    Assert-SteamVRCleanupLayout -SteamVRRoot $Root
     $startupAccepted = $true
     try {
-        Assert-SteamVrRuntimeLayout -SteamVrRoot $Root
+        Assert-SteamVRRuntimeLayout -SteamVRRoot $Root
     } catch {
         $startupAccepted = $false
     }
@@ -82,7 +82,7 @@ New-Item -ItemType Directory -Path $unrecognizedRunDirectory -Force | Out-Null
 $unrecognizedConfiguration = Write-FixtureRunConfiguration `
     -Module $module `
     -RunDirectory $unrecognizedRunDirectory `
-    -Configuration (New-FixtureRunConfiguration -RunId $unrecognizedRunId -SteamVrRoot $incompleteRuntime)
+    -Configuration (New-FixtureRunConfiguration -RunId $unrecognizedRunId -SteamVRRoot $incompleteRuntime)
 [pscustomobject]@{ runId = $unrecognizedRunId } |
     ConvertTo-Json |
     Set-Content -LiteralPath (Join-Path $unrecognizedStateRoot 'active-run.json') -Encoding utf8NoBOM
@@ -100,7 +100,7 @@ $inspectionResult = & $module {
 
     Set-Item -Path Function:Get-CimInstance -Value { throw 'injected process query failure' }
     try {
-        $check = Invoke-SteamVrHeadlessCheck -SteamVrRoot $RuntimeRoot -StateRoot $StateRoot
+        $check = Invoke-SteamVRNullDriverCheck -SteamVRRoot $RuntimeRoot -StateRoot $StateRoot
         $identityQueryFailed = $false
         try {
             $null = Get-SupervisorAlive -Supervisor $ProcessRecord
@@ -114,7 +114,7 @@ $inspectionResult = & $module {
     } finally {
         Remove-Item -Path Function:Get-CimInstance -Force
     }
-} $Context.SteamVrRoot (Join-Path $Context.Root 'query-failure-state') $currentProcessRecord
+} $Context.SteamVRRoot (Join-Path $Context.Root 'query-failure-state') $currentProcessRecord
 Assert-True (-not $inspectionResult.checkOk) 'A failed process query was treated as an idle runtime.'
 Assert-True $inspectionResult.identityQueryFailed 'A failed identity query was treated as a stopped supervisor.'
 Complete-Test 'process query failures do not imply an idle runtime'
@@ -133,7 +133,7 @@ $unreadableResult = & $module {
     }
     try {
         try {
-            $null = Get-SteamVrRuntimeProcesses -SteamVrRoot $RuntimeRoot
+            $null = Get-SteamVRRuntimeProcesses -SteamVRRoot $RuntimeRoot
             [pscustomobject]@{ failed = $false; error = $null }
         } catch {
             [pscustomobject]@{ failed = $true; error = $_.Exception.Message }
@@ -141,7 +141,7 @@ $unreadableResult = & $module {
     } finally {
         Remove-Item -Path Function:Get-CimInstance -Force
     }
-} $Context.SteamVrRoot
+} $Context.SteamVRRoot
 Assert-True $unreadableResult.failed 'An unreadable SteamVR process was ignored.'
 Assert-True ($unreadableResult.error -match 'no readable executable path') 'The unreadable-process error did not identify the missing path.'
 Complete-Test 'unreadable SteamVR process blocks runtime inspection'
@@ -162,11 +162,11 @@ $transientProcessCount = & $module {
         }
     }
     try {
-        @(Get-SteamVrRuntimeProcesses -SteamVrRoot $RuntimeRoot).Count
+        @(Get-SteamVRRuntimeProcesses -SteamVRRoot $RuntimeRoot).Count
     } finally {
         Remove-Item -Path Function:Get-CimInstance -Force
     }
-} $Context.SteamVrRoot
+} $Context.SteamVRRoot
 Assert-Equal $transientProcessCount 0 'A process that exited during inspection remained in the runtime result.'
 Complete-Test 'process exit during inspection is handled as stopped'
 
@@ -179,7 +179,7 @@ New-Item -ItemType Directory -Path $ownedRunDirectory, $otherRunDirectory -Force
 $ownedConfiguration = Write-FixtureRunConfiguration `
     -Module $module `
     -RunDirectory $ownedRunDirectory `
-    -Configuration (New-FixtureRunConfiguration -RunId $ownedRunId -SteamVrRoot $Context.SteamVrRoot)
+    -Configuration (New-FixtureRunConfiguration -RunId $ownedRunId -SteamVRRoot $Context.SteamVRRoot)
 New-Item -ItemType Directory -Path $ownedConfiguration.privateConfigRoot -Force | Out-Null
 $ownershipMarker = Join-Path $ownedConfiguration.privateConfigRoot 'marker.txt'
 [System.IO.File]::WriteAllText($ownershipMarker, 'keep')
@@ -204,16 +204,16 @@ New-Item -ItemType Directory -Path $shutdownRunDirectory -Force | Out-Null
 $shutdownConfiguration = Write-FixtureRunConfiguration `
     -Module $module `
     -RunDirectory $shutdownRunDirectory `
-    -Configuration (New-FixtureRunConfiguration -RunId $shutdownRunId -SteamVrRoot $Context.SteamVrRoot)
+    -Configuration (New-FixtureRunConfiguration -RunId $shutdownRunId -SteamVRRoot $Context.SteamVRRoot)
 [pscustomobject]@{ runId = $shutdownRunId } |
     ConvertTo-Json |
     Set-Content -LiteralPath (Join-Path $shutdownStateRoot 'active-run.json') -Encoding utf8NoBOM
-$originalStopSteamVrRuntime = & $module {
-    (Get-Command Stop-SteamVrRuntime -CommandType Function).ScriptBlock
+$originalStopSteamVRRuntime = & $module {
+    (Get-Command Stop-SteamVRRuntime -CommandType Function).ScriptBlock
 }
 & $module {
-    Set-Item -Path Function:script:Stop-SteamVrRuntime -Value {
-        param($SteamVrRoot, $PrivateConfigRoot, $PrivateLogRoot)
+    Set-Item -Path Function:script:Stop-SteamVRRuntime -Value {
+        param($SteamVRRoot, $PrivateConfigRoot, $PrivateLogRoot)
         [pscustomobject]@{
             graceful = @()
             forced = @()
@@ -237,8 +237,8 @@ try {
 } finally {
     & $module {
         param($Original)
-        Set-Item -Path Function:script:Stop-SteamVrRuntime -Value $Original
-    } $originalStopSteamVrRuntime
+        Set-Item -Path Function:script:Stop-SteamVRRuntime -Value $Original
+    } $originalStopSteamVRRuntime
 }
 Complete-Test 'cleanup removes ownership after runtime shutdown'
 

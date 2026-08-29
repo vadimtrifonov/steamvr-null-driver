@@ -3,12 +3,12 @@ param([Parameter(Mandatory)]$Context)
 
 $module = $Context.Module
 
-$settingsText = & $module { Get-HeadlessSettingsText }
+$settingsText = & $module { Get-NullDriverSettingsText }
 $settings = $settingsText | ConvertFrom-Json
 Assert-PropertySet `
     -Value $settings `
     -Names @('steamvr', 'driver_null', 'dashboard', 'direct_mode') `
-    -Message 'The headless settings have an unexpected top-level shape.'
+    -Message 'The null-driver settings have an unexpected top-level shape.'
 Assert-PropertySet `
     -Value $settings.steamvr `
     -Names @(
@@ -20,16 +20,16 @@ Assert-PropertySet `
         'enableHomeApp'
     ) `
     -Message 'The steamvr section has an unexpected shape.'
-Assert-Equal $settings.steamvr.requireHmd $false 'The headless settings require an HMD.'
-Assert-Equal $settings.steamvr.forcedDriver 'null' 'The headless settings do not force the null driver.'
-Assert-Equal $settings.steamvr.activateMultipleDrivers $false 'The headless settings allow multiple drivers.'
-Assert-Equal $settings.steamvr.startDashboardFromAppLaunch $false 'The headless settings start the dashboard.'
-Assert-Equal $settings.steamvr.startOverlayAppsFromDashboard $false 'The headless settings start dashboard overlays.'
-Assert-Equal $settings.steamvr.enableHomeApp $false 'The headless settings enable SteamVR Home.'
-Assert-Equal $settings.driver_null.enable $true 'The headless settings do not enable the null driver.'
-Assert-Equal $settings.dashboard.enableDashboard $false 'The headless settings enable the dashboard.'
-Assert-Equal $settings.direct_mode.enable $false 'The headless settings enable Direct Display Mode.'
-Complete-Test 'headless settings define null-only mode'
+Assert-Equal $settings.steamvr.requireHmd $false 'The null-driver settings require an HMD.'
+Assert-Equal $settings.steamvr.forcedDriver 'null' 'The null-driver settings do not force the null driver.'
+Assert-Equal $settings.steamvr.activateMultipleDrivers $false 'The null-driver settings allow multiple drivers.'
+Assert-Equal $settings.steamvr.startDashboardFromAppLaunch $false 'The null-driver settings start the dashboard.'
+Assert-Equal $settings.steamvr.startOverlayAppsFromDashboard $false 'The null-driver settings start dashboard overlays.'
+Assert-Equal $settings.steamvr.enableHomeApp $false 'The null-driver settings enable SteamVR Home.'
+Assert-Equal $settings.driver_null.enable $true 'The null-driver settings do not enable the null driver.'
+Assert-Equal $settings.dashboard.enableDashboard $false 'The null-driver settings enable the dashboard.'
+Assert-Equal $settings.direct_mode.enable $false 'The null-driver settings enable Direct Display Mode.'
+Complete-Test 'null-driver settings define null-only mode'
 
 $chaperone = (& $module { Get-TemporaryChaperoneText }) | ConvertFrom-Json
 Assert-Equal $chaperone.jsonid 'chaperone_info' 'The temporary chaperone identifier is invalid.'
@@ -89,12 +89,12 @@ $sharedAssessment = & $module { param($Text) Get-VrLogAssessment -Text $Text } $
 Assert-True $sharedAssessment.ready 'The shared log reader did not return complete startup evidence.'
 Complete-Test 'SteamVR log can be read while shared'
 
-$privateRunRoot = Join-Path $Context.Root 'private-headless-mode'
+$privateRunRoot = Join-Path $Context.Root 'private-null-driver-mode'
 $privateConfigRoot = Join-Path $privateRunRoot 'config'
 $privateLogRoot = Join-Path $privateRunRoot 'logs'
 & $module {
     param($ConfigRoot, $LogRoot)
-    Initialize-PrivateHeadlessConfiguration -PrivateConfigRoot $ConfigRoot -PrivateLogRoot $LogRoot
+    Initialize-PrivateNullDriverConfiguration -PrivateConfigRoot $ConfigRoot -PrivateLogRoot $LogRoot
 } $privateConfigRoot $privateLogRoot
 $privateSettings = Get-Content -LiteralPath (Join-Path $privateConfigRoot 'steamvr.vrsettings') -Raw | ConvertFrom-Json
 $privateChaperone = Get-Content -LiteralPath (Join-Path $privateConfigRoot 'chaperone_info.vrchap') -Raw | ConvertFrom-Json
@@ -112,11 +112,11 @@ $processInfo = & $module {
     param($Path, $RuntimeRoot, $ConfigRoot, $LogRoot)
     New-OpenVrProcessInfo `
         -Path $Path `
-        -SteamVrRoot $RuntimeRoot `
+        -SteamVRRoot $RuntimeRoot `
         -PrivateConfigRoot $ConfigRoot `
         -PrivateLogRoot $LogRoot
-} (Join-Path $Context.SteamVrRoot 'bin\win64\vrstartup.exe') $Context.SteamVrRoot $privateConfigRoot $privateLogRoot
-Assert-Equal $processInfo.Environment['VR_OVERRIDE'] ([IO.Path]::GetFullPath($Context.SteamVrRoot)) 'VR_OVERRIDE does not select the fixture runtime.'
+} (Join-Path $Context.SteamVRRoot 'bin\win64\vrstartup.exe') $Context.SteamVRRoot $privateConfigRoot $privateLogRoot
+Assert-Equal $processInfo.Environment['VR_OVERRIDE'] ([IO.Path]::GetFullPath($Context.SteamVRRoot)) 'VR_OVERRIDE does not select the fixture runtime.'
 Assert-Equal $processInfo.Environment['VR_CONFIG_PATH'] ([IO.Path]::GetFullPath($privateConfigRoot)) 'VR_CONFIG_PATH does not select the private configuration.'
 Assert-Equal $processInfo.Environment['VR_LOG_PATH'] ([IO.Path]::GetFullPath($privateLogRoot)) 'VR_LOG_PATH does not select the private logs.'
 Complete-Test 'OpenVR child environment uses private run paths'

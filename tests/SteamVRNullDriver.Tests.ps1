@@ -5,19 +5,19 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'TestHarness.ps1')
 
 $repositoryRoot = Split-Path -Parent $PSScriptRoot
-$modulePath = Join-Path $repositoryRoot 'scripts\SteamVrHeadless.psm1'
+$modulePath = Join-Path $repositoryRoot 'scripts\SteamVRNullDriver.psm1'
 $module = Import-Module -Name $modulePath -Force -PassThru
-$testRoot = Join-Path $env:TEMP ("steamvr-headless-tests-" + [Guid]::NewGuid().ToString('N'))
+$testRoot = Join-Path $env:TEMP ("steamvr-null-driver-tests-" + [Guid]::NewGuid().ToString('N'))
 $originalGetSteamClientProcesses = $null
 $currentSuite = $null
 
 try {
     New-Item -ItemType Directory -Path $testRoot -Force | Out-Null
 
-    $steamVrRoot = Join-Path $testRoot 'SteamLibrary\steamapps\common\SteamVR'
-    $secondSteamVrRoot = Join-Path $testRoot 'SecondSteamLibrary\steamapps\common\SteamVR'
-    New-FixtureSteamVrRuntime -Root $steamVrRoot
-    New-FixtureSteamVrRuntime -Root $secondSteamVrRoot
+    $steamVRRoot = Join-Path $testRoot 'SteamLibrary\steamapps\common\SteamVR'
+    $secondSteamVRRoot = Join-Path $testRoot 'SecondSteamLibrary\steamapps\common\SteamVR'
+    New-FixtureSteamVRRuntime -Root $steamVRRoot
+    New-FixtureSteamVRRuntime -Root $secondSteamVRRoot
 
     $originalGetSteamClientProcesses = & $module {
         (Get-Command Get-SteamClientProcesses -CommandType Function).ScriptBlock
@@ -34,14 +34,14 @@ try {
         RepositoryRoot = $repositoryRoot
         Root = $testRoot
         Module = $module
-        EntryScript = Join-Path $repositoryRoot 'scripts\steamvr-headless.ps1'
+        EntryScript = Join-Path $repositoryRoot 'scripts\SteamVRNullDriver.ps1'
         SupervisorScript = Join-Path $repositoryRoot 'scripts\internal\SupervisorHost.ps1'
-        SteamVrRoot = $steamVrRoot
-        SecondSteamVrRoot = $secondSteamVrRoot
+        SteamVRRoot = $steamVRRoot
+        SecondSteamVRRoot = $secondSteamVRRoot
     }
 
     foreach ($suite in @(
-        'HeadlessMode.ps1',
+        'NullDriverMode.ps1',
         'RuntimeOwnership.ps1',
         'RunState.ps1',
         'Lifecycle.ps1'
@@ -52,15 +52,15 @@ try {
 
     [pscustomobject]@{
         ok = $true
-        passed = $global:SteamVrHeadlessPassedTests.Count
-        tests = @($global:SteamVrHeadlessPassedTests)
+        passed = $global:SteamVRNullDriverPassedTests.Count
+        tests = @($global:SteamVRNullDriverPassedTests)
     } | ConvertTo-Json -Depth 5
     exit 0
 } catch {
     [pscustomobject]@{
         ok = $false
-        passed = $global:SteamVrHeadlessPassedTests.Count
-        tests = @($global:SteamVrHeadlessPassedTests)
+        passed = $global:SteamVRNullDriverPassedTests.Count
+        tests = @($global:SteamVRNullDriverPassedTests)
         suite = $currentSuite
         error = $_.Exception.Message
         location = $_.InvocationInfo.PositionMessage
@@ -75,5 +75,5 @@ try {
         } $originalGetSteamClientProcesses
     }
     Remove-Item -LiteralPath $testRoot -Recurse -Force -ErrorAction SilentlyContinue
-    Remove-Variable -Name SteamVrHeadlessPassedTests -Scope Global -ErrorAction SilentlyContinue
+    Remove-Variable -Name SteamVRNullDriverPassedTests -Scope Global -ErrorAction SilentlyContinue
 }

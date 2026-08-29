@@ -20,8 +20,8 @@ function Invoke-RunCleanup {
     }
 
     try {
-        $result.processStops = Stop-SteamVrRuntime `
-            -SteamVrRoot ([string]$Configuration.steamVrRoot) `
+        $result.processStops = Stop-SteamVRRuntime `
+            -SteamVRRoot ([string]$Configuration.steamVRRoot) `
             -PrivateConfigRoot ([string]$Configuration.privateConfigRoot) `
             -PrivateLogRoot ([string]$Configuration.privateLogRoot)
     } catch {
@@ -65,7 +65,7 @@ function Invoke-DeadRunCleanup {
         error = $cleanup.error
         deadlineUtc = $Configuration.deadlineUtc
         environment = Get-OpenVrEnvironment `
-            -SteamVrRoot $Configuration.steamVrRoot `
+            -SteamVRRoot $Configuration.steamVRRoot `
             -PrivateConfigRoot $Configuration.privateConfigRoot `
             -PrivateLogRoot $Configuration.privateLogRoot
         evidence = $null

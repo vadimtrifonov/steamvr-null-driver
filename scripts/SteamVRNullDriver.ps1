@@ -4,7 +4,7 @@ param(
     [ValidateSet('check', 'start', 'status', 'stop')]
     [string]$Action,
 
-    [string]$SteamVrRoot,
+    [string]$SteamVRRoot,
     [string]$RunId,
 
     [ValidateRange(1, 120)]
@@ -12,29 +12,29 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$modulePath = Join-Path $PSScriptRoot 'SteamVrHeadless.psm1'
+$modulePath = Join-Path $PSScriptRoot 'SteamVRNullDriver.psm1'
 Import-Module -Name $modulePath -Force
 
 try {
-    $stateRoot = [System.IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA 'SteamVrHeadless'))
+    $stateRoot = [System.IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA 'SteamVRNullDriver'))
     $result = switch ($Action) {
         'check' {
-            Invoke-SteamVrHeadlessCheck -SteamVrRoot $SteamVrRoot -StateRoot $stateRoot
+            Invoke-SteamVRNullDriverCheck -SteamVRRoot $SteamVRRoot -StateRoot $stateRoot
         }
         'start' {
-            Start-SteamVrHeadlessRun `
-                -SteamVrRoot $SteamVrRoot `
+            Start-SteamVRNullDriverRun `
+                -SteamVRRoot $SteamVRRoot `
                 -StateRoot $stateRoot `
                 -SupervisorScriptPath (Join-Path $PSScriptRoot 'internal\SupervisorHost.ps1') `
                 -MaxDurationMinutes $MaxDurationMinutes
         }
         'status' {
             if (-not $RunId) { throw 'status requires -RunId.' }
-            Get-SteamVrHeadlessStatus -RunId $RunId -StateRoot $stateRoot
+            Get-SteamVRNullDriverStatus -RunId $RunId -StateRoot $stateRoot
         }
         'stop' {
             if (-not $RunId) { throw 'stop requires -RunId.' }
-            Stop-SteamVrHeadlessRun -RunId $RunId -StateRoot $stateRoot
+            Stop-SteamVRNullDriverRun -RunId $RunId -StateRoot $stateRoot
         }
     }
 

@@ -1,9 +1,9 @@
 ---
-name: steamvr-headless
-description: Start, inspect, and stop bounded SteamVR null-HMD sessions without a physical headset. Use for headless SteamVR startup, null-driver diagnostics, or interrupted-run cleanup.
+name: steamvr-null-driver
+description: Start, inspect, and stop bounded SteamVR sessions that use the built-in null driver instead of a physical headset.
 ---
 
-# SteamVR Headless
+# SteamVR Null Driver
 
 Use this skill directory as the working directory.
 
@@ -23,17 +23,17 @@ Run lifecycle commands sequentially. Operate one run at a time.
 `check` is optional. `start` does the same authoritative preflight.
 
 ```powershell
-pwsh -NoProfile -File scripts/steamvr-headless.ps1 check
+pwsh -NoProfile -File scripts/SteamVRNullDriver.ps1 check
 ```
 
 Continue when `ok=true` and `canStart=true`.
 
-If registration is unavailable or ambiguous, add `-SteamVrRoot "<SteamVR-root>"` to `check` and `start`.
+If registration is unavailable or ambiguous, add `-SteamVRRoot "<SteamVR-root>"` to `check` and `start`.
 
 ### 2. Start SteamVR
 
 ```powershell
-pwsh -NoProfile -File scripts/steamvr-headless.ps1 start `
+pwsh -NoProfile -File scripts/SteamVRNullDriver.ps1 start `
   -MaxDurationMinutes 30
 ```
 
@@ -41,9 +41,9 @@ The duration includes startup. The permitted range is 1 through 120 minutes.
 
 Continue when `ok=true` and `run.phase=ready`. Save `runId` and `run.environment`.
 
-If `start` returns a run ID without readiness, run `status`. Then run `stop` with that run ID.
+If `start` returns a run ID without readiness, run state exists. Run `status`. Then run `stop` with that run ID.
 
-If `start` returns no run ID, correct the preflight error before you try again.
+If `start` returns no run ID, no run state was retained. Correct the reported error before you try again.
 
 ### 3. Start a child application
 
@@ -56,7 +56,7 @@ Readiness does not prove that a scene application can connect or render. Do a se
 ### 4. Check run status
 
 ```powershell
-pwsh -NoProfile -File scripts/steamvr-headless.ps1 status `
+pwsh -NoProfile -File scripts/SteamVRNullDriver.ps1 status `
   -RunId "<run-id>"
 ```
 
@@ -67,7 +67,7 @@ A usable active run has `active=true`, `supervisorAlive=true`, and `run.phase=re
 Always run `stop` in a `finally` path after child work.
 
 ```powershell
-pwsh -NoProfile -File scripts/steamvr-headless.ps1 stop `
+pwsh -NoProfile -File scripts/SteamVRNullDriver.ps1 stop `
   -RunId "<run-id>"
 ```
 
@@ -77,7 +77,7 @@ If `run.phase=cleanup-required`, correct the reported process problem. Then run 
 
 ## Installation boundary
 
-The helper supports one Windows account, one selected SteamVR installation, and `%LOCALAPPDATA%\SteamVrHeadless` as its state root.
+The helper supports one Windows account, one selected SteamVR installation, and `%LOCALAPPDATA%\SteamVRNullDriver` as its state root.
 
 The Steam client and SteamVR can be on different drives or in different Steam libraries.
 
@@ -91,7 +91,7 @@ Each run has unique configuration and log directories. `run.environment` contain
 
 The private settings force `null` and disable multiple-driver activation. They also disable dashboard applications and Direct Display Mode.
 
-The helper does not read or change the normal SteamVR settings or chaperone files. Steam can update Steam-owned logs and application metadata.
+The helper does not read or change the normal SteamVR settings or chaperone files. Steam can update Steam-owned logs, application metadata, and the global `%LOCALAPPDATA%\SteamVR\htmlcache`.
 
 The private chaperone file supplies zero seated and standing origins for universe `2`. These origins only suppress Room Setup.
 
@@ -118,6 +118,8 @@ Do not start SteamVR manually during an owned lease. Cleanup can stop a manually
 
 Cleanup requests `vrmonitor://quit`, stops exact remaining processes, and checks the complete runtime root. It removes the lock last.
 
+Empty state-root and `runs` directories can remain after cleanup. They do not own the runtime.
+
 If process inspection or shutdown fails, cleanup retains the lock and private evidence.
 
 An unreadable path for a known SteamVR process stops inspection. Inaccessible unrelated Windows processes remain outside the ownership decision.
@@ -130,9 +132,9 @@ Malformed active state or an orphan lock requires manual inspection.
 
 `check` reports retained run state in `inactiveRuns`. These runs do not own the runtime.
 
-A new lock owner removes retained run state before startup.
+A new start does not remove retained run state.
 
-Use `status -RunId` to inspect a retained run. Use `stop -RunId` to remove it before the next start.
+Use `status -RunId` to inspect a retained run. Use `stop -RunId` to remove it explicitly.
 
 ## Output
 

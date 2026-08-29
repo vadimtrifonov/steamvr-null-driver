@@ -73,7 +73,7 @@ function Assert-RunContinues {
     }
 }
 
-function Invoke-SteamVrHeadlessSupervisor {
+function Invoke-SteamVRNullDriverSupervisor {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][string]$RunId,
@@ -88,7 +88,7 @@ function Invoke-SteamVrHeadlessSupervisor {
         error = $null
         deadlineUtc = $configuration.deadlineUtc
         environment = Get-OpenVrEnvironment `
-            -SteamVrRoot $configuration.steamVrRoot `
+            -SteamVRRoot $configuration.steamVRRoot `
             -PrivateConfigRoot $configuration.privateConfigRoot `
             -PrivateLogRoot $configuration.privateLogRoot
         evidence = $null
@@ -108,22 +108,22 @@ function Invoke-SteamVrHeadlessSupervisor {
 
     try {
         Assert-RunContinues -RunDirectory $runDirectory -LeaseDeadline $leaseDeadline
-        Assert-SteamVrRuntimeLayout -SteamVrRoot $configuration.steamVrRoot
-        if (@(Get-SteamVrRuntimeProcesses -SteamVrRoot $configuration.steamVrRoot).Count -gt 0) {
+        Assert-SteamVRRuntimeLayout -SteamVRRoot $configuration.steamVRRoot
+        if (@(Get-SteamVRRuntimeProcesses -SteamVRRoot $configuration.steamVRRoot).Count -gt 0) {
             throw 'A SteamVR process started after the run reserved the runtime.'
         }
 
-        Initialize-PrivateHeadlessConfiguration `
+        Initialize-PrivateNullDriverConfiguration `
             -PrivateConfigRoot $configuration.privateConfigRoot `
             -PrivateLogRoot $configuration.privateLogRoot
         Assert-RunContinues -RunDirectory $runDirectory -LeaseDeadline $leaseDeadline
-        if (@(Get-SteamVrRuntimeProcesses -SteamVrRoot $configuration.steamVrRoot).Count -gt 0) {
+        if (@(Get-SteamVRRuntimeProcesses -SteamVRRoot $configuration.steamVRRoot).Count -gt 0) {
             throw 'A SteamVR process started while the private configuration was prepared.'
         }
 
         [void](Start-VrStartupProcess `
             -Path $configuration.vrStartupPath `
-            -SteamVrRoot $configuration.steamVrRoot `
+            -SteamVRRoot $configuration.steamVRRoot `
             -PrivateConfigRoot $configuration.privateConfigRoot `
             -PrivateLogRoot $configuration.privateLogRoot)
 
@@ -132,9 +132,9 @@ function Invoke-SteamVrHeadlessSupervisor {
         $startupValidated = $false
         do {
             Assert-RunContinues -RunDirectory $runDirectory -LeaseDeadline $leaseDeadline
-            $runtimeProcesses = @(Get-SteamVrRuntimeProcesses -SteamVrRoot $configuration.steamVrRoot)
+            $runtimeProcesses = @(Get-SteamVRRuntimeProcesses -SteamVRRoot $configuration.steamVRRoot)
             if (@($runtimeProcesses | Where-Object { $_.name -eq 'steamvr_room_setup' }).Count -gt 0) {
-                throw 'SteamVR Room Setup started during headless startup.'
+                throw 'SteamVR Room Setup started during null-driver startup.'
             }
 
             $assessment = Get-VrLogAssessment -Text (Read-VrLogText -Path $vrServerLog)
@@ -146,7 +146,7 @@ function Invoke-SteamVrHeadlessSupervisor {
                 throw "Unexpected SteamVR driver or HMD mode detected: $drivers"
             }
             if ($assessment.roomSetupDetected) {
-                throw 'SteamVR Room Setup launched during headless startup.'
+                throw 'SteamVR Room Setup launched during null-driver startup.'
             }
 
             $servers = @($runtimeProcesses | Where-Object { $_.name -eq 'vrserver' })
