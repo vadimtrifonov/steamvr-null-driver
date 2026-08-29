@@ -44,14 +44,14 @@ function Resolve-SteamVrPaths {
         } else {
             Join-Path $candidate 'steamapps\common\SteamVR'
         }
-        $configPath = Join-Path $candidate 'config\steamvr.vrsettings'
+        $sourceSettingsPath = Join-Path $candidate 'config\steamvr.vrsettings'
         $startupPath = Join-Path $runtimeRoot 'bin\win64\vrstartup.exe'
-        if ((Test-Path -LiteralPath $configPath -PathType Leaf) -and (Test-Path -LiteralPath $startupPath -PathType Leaf)) {
+        if ((Test-Path -LiteralPath $sourceSettingsPath -PathType Leaf) -and (Test-Path -LiteralPath $startupPath -PathType Leaf)) {
             $valid.Add([pscustomobject]@{
                 steamRoot = $candidate
                 steamVrRoot = ConvertTo-FullPath $runtimeRoot
-                configRoot = Join-Path $candidate 'config'
-                settingsPath = $configPath
+                sourceConfigRoot = Join-Path $candidate 'config'
+                sourceSettingsPath = $sourceSettingsPath
                 vrStartupPath = $startupPath
             })
         }
@@ -136,10 +136,7 @@ function Resolve-ProcessForRuntimeInspection {
 }
 
 function Get-SteamVrRuntimeProcesses {
-    param(
-        [Parameter(Mandatory)][string]$SteamVrRoot,
-        [DateTime]$SinceUtc = [DateTime]::MinValue
-    )
+    param([Parameter(Mandatory)][string]$SteamVrRoot)
 
     $root = ConvertTo-FullPath $SteamVrRoot
     $items = [System.Collections.Generic.List[object]]::new()
@@ -153,10 +150,7 @@ function Get-SteamVrRuntimeProcesses {
         if (-not (Test-PathWithin -Path $path -Root $root)) {
             continue
         }
-        $record = ConvertTo-ProcessRecord -Process $process
-        if ((ConvertTo-UtcDateTime $record.creationUtc) -ge $SinceUtc) {
-            $items.Add($record)
-        }
+        $items.Add((ConvertTo-ProcessRecord -Process $process))
     }
     @($items | Sort-Object pid)
 }
@@ -185,15 +179,14 @@ function Test-ProcessRecordAlive {
 function Stop-SteamVrRuntime {
     param(
         [Parameter(Mandatory)][string]$SteamVrRoot,
-        [Parameter(Mandatory)][DateTime]$SinceUtc,
-        [string]$ConfigRoot,
-        [string]$LogRoot
+        [Parameter(Mandatory)][string]$PrivateConfigRoot,
+        [Parameter(Mandatory)][string]$PrivateLogRoot
     )
 
     $graceful = [System.Collections.Generic.List[string]]::new()
     $forced = [System.Collections.Generic.List[string]]::new()
     $stopErrors = [System.Collections.Generic.List[string]]::new()
-    $records = @(Get-SteamVrRuntimeProcesses -SteamVrRoot $SteamVrRoot -SinceUtc $SinceUtc)
+    $records = @(Get-SteamVrRuntimeProcesses -SteamVrRoot $SteamVrRoot)
     if ($records.Count -eq 0) {
         return [pscustomobject]@{
             graceful = @()
@@ -207,16 +200,10 @@ function Stop-SteamVrRuntime {
     $monitor = @($records | Where-Object { $_.name -eq 'vrmonitor' } | Select-Object -First 1)
     if ($monitor.Count -gt 0) {
         try {
-            $info = [System.Diagnostics.ProcessStartInfo]::new()
-            $info.FileName = $monitor[0].path
-            $info.WorkingDirectory = Split-Path -Parent $monitor[0].path
-            $info.UseShellExecute = $false
-            if ($ConfigRoot) {
-                $info.Environment['VR_CONFIG_PATH'] = ConvertTo-FullPath $ConfigRoot
-            }
-            if ($LogRoot) {
-                $info.Environment['VR_LOG_PATH'] = ConvertTo-FullPath $LogRoot
-            }
+            $info = New-OpenVrProcessInfo `
+                -Path $monitor[0].path `
+                -PrivateConfigRoot $PrivateConfigRoot `
+                -PrivateLogRoot $PrivateLogRoot
             [void]$info.ArgumentList.Add('vrmonitor://quit')
             [void][System.Diagnostics.Process]::Start($info)
             $graceful.Add("vrmonitor-protocol:$($monitor[0].pid)")
@@ -228,7 +215,7 @@ function Stop-SteamVrRuntime {
     if ($monitor.Count -gt 0) {
         $gracefulDeadline = [DateTime]::UtcNow.AddSeconds(12)
         while ([DateTime]::UtcNow -lt $gracefulDeadline) {
-            if (@(Get-SteamVrRuntimeProcesses -SteamVrRoot $SteamVrRoot -SinceUtc $SinceUtc).Count -eq 0) {
+            if (@(Get-SteamVrRuntimeProcesses -SteamVrRoot $SteamVrRoot).Count -eq 0) {
                 break
             }
             Start-Sleep -Milliseconds 400
@@ -237,7 +224,7 @@ function Stop-SteamVrRuntime {
 
     $stopOrder = $script:CanonicalSteamVrProcessNames
     for ($pass = 0; $pass -lt 2; $pass++) {
-        $records = @(Get-SteamVrRuntimeProcesses -SteamVrRoot $SteamVrRoot -SinceUtc $SinceUtc)
+        $records = @(Get-SteamVrRuntimeProcesses -SteamVrRoot $SteamVrRoot)
         foreach ($name in $stopOrder) {
             foreach ($record in @($records | Where-Object { $_.name -eq $name })) {
                 try {
@@ -263,7 +250,7 @@ function Stop-SteamVrRuntime {
         Start-Sleep -Milliseconds 500
     }
 
-    $remaining = @(Get-SteamVrRuntimeProcesses -SteamVrRoot $SteamVrRoot -SinceUtc $SinceUtc)
+    $remaining = @(Get-SteamVrRuntimeProcesses -SteamVrRoot $SteamVrRoot)
     [pscustomobject]@{
         graceful = @($graceful)
         forced = @($forced)
@@ -273,29 +260,34 @@ function Stop-SteamVrRuntime {
     }
 }
 
-function New-VrStartupProcessInfo {
+function New-OpenVrProcessInfo {
     param(
         [Parameter(Mandatory)][string]$Path,
-        [Parameter(Mandatory)][string]$ConfigRoot,
-        [Parameter(Mandatory)][string]$LogRoot
+        [Parameter(Mandatory)][string]$PrivateConfigRoot,
+        [Parameter(Mandatory)][string]$PrivateLogRoot
     )
 
+    $environment = Get-OpenVrEnvironment -PrivateConfigRoot $PrivateConfigRoot -PrivateLogRoot $PrivateLogRoot
     $info = [System.Diagnostics.ProcessStartInfo]::new()
     $info.FileName = $Path
     $info.WorkingDirectory = Split-Path -Parent $Path
     $info.UseShellExecute = $false
-    $info.Environment['VR_CONFIG_PATH'] = ConvertTo-FullPath $ConfigRoot
-    $info.Environment['VR_LOG_PATH'] = ConvertTo-FullPath $LogRoot
+    foreach ($property in $environment.PSObject.Properties) {
+        $info.Environment[$property.Name] = [string]$property.Value
+    }
     $info
 }
 
 function Start-VrStartupProcess {
     param(
         [Parameter(Mandatory)][string]$Path,
-        [Parameter(Mandatory)][string]$ConfigRoot,
-        [Parameter(Mandatory)][string]$LogRoot
+        [Parameter(Mandatory)][string]$PrivateConfigRoot,
+        [Parameter(Mandatory)][string]$PrivateLogRoot
     )
 
-    $info = New-VrStartupProcessInfo -Path $Path -ConfigRoot $ConfigRoot -LogRoot $LogRoot
+    $info = New-OpenVrProcessInfo `
+        -Path $Path `
+        -PrivateConfigRoot $PrivateConfigRoot `
+        -PrivateLogRoot $PrivateLogRoot
     [System.Diagnostics.Process]::Start($info)
 }

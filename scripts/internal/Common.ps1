@@ -110,9 +110,3 @@ function Write-JsonAtomic {
         Remove-Item -LiteralPath $temporaryPath -Force -ErrorAction SilentlyContinue
     }
 }
-
-function Get-ByteHash {
-    param([Parameter(Mandatory)][byte[]]$Bytes)
-
-    [Convert]::ToHexString([System.Security.Cryptography.SHA256]::HashData($Bytes))
-}

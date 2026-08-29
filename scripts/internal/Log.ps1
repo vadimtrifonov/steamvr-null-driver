@@ -1,37 +1,6 @@
-function Read-StreamBytes {
-    param(
-        [Parameter(Mandatory)][System.IO.Stream]$Stream,
-        [Parameter(Mandatory)][long]$Offset,
-        [Parameter(Mandatory)][int]$Count
-    )
-
-    $buffer = [byte[]]::new($Count)
-    [void]$Stream.Seek($Offset, [System.IO.SeekOrigin]::Begin)
-    $total = 0
-    while ($total -lt $Count) {
-        $read = $Stream.Read($buffer, $total, $Count - $total)
-        if ($read -eq 0) {
-            return $null
-        }
-        $total += $read
-    }
-    Write-Output -NoEnumerate $buffer
-}
-
-function New-TextCursor {
+function Read-VrLogText {
     param([Parameter(Mandatory)][string]$Path)
 
-    $cursor = [pscustomobject]@{
-        offset = 0L
-        reset = $false
-        anchorOffset = 0L
-        anchorLength = 0
-        anchorHash = $null
-    }
-    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
-        return $cursor
-    }
-
     try {
         $stream = [System.IO.File]::Open(
             $Path,
@@ -40,67 +9,12 @@ function New-TextCursor {
             [System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete
         )
     } catch [System.IO.FileNotFoundException] {
-        return $cursor
-    } catch [System.IO.DirectoryNotFoundException] {
-        return $cursor
-    }
-
-    try {
-        $cursor.offset = $stream.Length
-        if ($cursor.offset -gt 0) {
-            $cursor.anchorLength = [int][Math]::Min(128L, [long]$cursor.offset)
-            $cursor.anchorOffset = [long]$cursor.offset - $cursor.anchorLength
-            $anchor = Read-StreamBytes -Stream $stream -Offset $cursor.anchorOffset -Count $cursor.anchorLength
-            if ($null -eq $anchor) {
-                throw 'The SteamVR log changed while its cursor was created.'
-            }
-            $cursor.anchorHash = Get-ByteHash -Bytes $anchor
-        }
-        $cursor
-    } finally {
-        $stream.Dispose()
-    }
-}
-
-function Read-TextFromCursor {
-    param(
-        [Parameter(Mandatory)][string]$Path,
-        [Parameter(Mandatory)]$Cursor
-    )
-
-    try {
-        $stream = [System.IO.File]::Open(
-            $Path,
-            [System.IO.FileMode]::Open,
-            [System.IO.FileAccess]::Read,
-            [System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete
-        )
-    } catch [System.IO.FileNotFoundException] {
-        if ([long]$Cursor.offset -gt 0) {
-            $Cursor.offset = 0L
-            $Cursor.reset = $true
-        }
         return ''
     } catch [System.IO.DirectoryNotFoundException] {
-        if ([long]$Cursor.offset -gt 0) {
-            $Cursor.offset = 0L
-            $Cursor.reset = $true
-        }
         return ''
     }
 
     try {
-        $reset = $stream.Length -lt [long]$Cursor.offset
-        if (-not $reset -and [long]$Cursor.offset -gt 0) {
-            $anchor = Read-StreamBytes -Stream $stream -Offset ([long]$Cursor.anchorOffset) -Count ([int]$Cursor.anchorLength)
-            $reset = $null -eq $anchor -or (Get-ByteHash -Bytes $anchor) -cne [string]$Cursor.anchorHash
-        }
-        if ($reset) {
-            $Cursor.offset = 0L
-            $Cursor.reset = $true
-        }
-
-        [void]$stream.Seek([long]$Cursor.offset, [System.IO.SeekOrigin]::Begin)
         $reader = [System.IO.StreamReader]::new($stream, [System.Text.UTF8Encoding]::new($false), $true, 4096, $true)
         try {
             $reader.ReadToEnd()

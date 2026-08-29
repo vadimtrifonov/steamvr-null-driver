@@ -10,11 +10,10 @@ function Invoke-SteamVrHeadlessCheck {
         $paths = Resolve-SteamVrPaths -SteamRoot $SteamRoot -SteamVrRoot $SteamVrRoot
         $processes = @(Get-SteamVrRuntimeProcesses -SteamVrRoot $paths.steamVrRoot)
         $active = Get-ActiveRunRecord -StateRoot $StateRoot
-        $pendingRuns = @(Get-PendingRunRecords -StateRoot $StateRoot)
         $settingsValid = $false
         $settingsError = $null
         try {
-            $null = [System.IO.File]::ReadAllText($paths.settingsPath) | ConvertFrom-Json
+            $null = [System.IO.File]::ReadAllText($paths.sourceSettingsPath) | ConvertFrom-Json
             $settingsValid = $true
         } catch {
             $settingsError = $_.Exception.Message
@@ -23,10 +22,9 @@ function Invoke-SteamVrHeadlessCheck {
         [pscustomobject]@{
             ok = $true
             action = 'check'
-            canStart = $settingsValid -and $processes.Count -eq 0 -and $null -eq $active -and $pendingRuns.Count -eq 0
+            canStart = $settingsValid -and $processes.Count -eq 0 -and $null -eq $active
             paths = $paths
             activeRun = $active
-            pendingRuns = $pendingRuns
             runtimeProcesses = $processes
             settingsValid = $settingsValid
             settingsError = $settingsError
@@ -99,7 +97,7 @@ function Start-SteamVrHeadlessRun {
         return [pscustomobject]@{
             ok = $false
             action = 'start'
-            error = 'Preflight rejected the start. SteamVR must be stopped, no unfinished run may exist, and the settings file must be valid JSON.'
+            error = 'Preflight rejected the start. SteamVR must be stopped, no active run may exist, and the source settings file must be valid JSON.'
             check = $check
         }
     }
@@ -109,19 +107,19 @@ function Start-SteamVrHeadlessRun {
     New-Item -ItemType Directory -Path $runDirectory -Force | Out-Null
     $createdUtc = [DateTime]::UtcNow
     $deadlineUtc = $createdUtc.AddMinutes($MaxDurationMinutes)
-    $configRoot = ConvertTo-FullPath (Join-Path $runDirectory 'config')
-    $logRoot = ConvertTo-FullPath (Join-Path $runDirectory 'logs')
+    $privateConfigRoot = ConvertTo-FullPath (Join-Path $runDirectory 'config')
+    $privateLogRoot = ConvertTo-FullPath (Join-Path $runDirectory 'logs')
     $configuration = [ordered]@{
-        schemaVersion = 2
+        schemaVersion = 3
         runId = $runId
         createdUtc = $createdUtc.ToString('o')
         deadlineUtc = $deadlineUtc.ToString('o')
         startupTimeoutSeconds = $StartupTimeoutSeconds
         steamRoot = $check.paths.steamRoot
         steamVrRoot = $check.paths.steamVrRoot
-        sourceConfigRoot = $check.paths.configRoot
-        configRoot = $configRoot
-        logRoot = $logRoot
+        sourceConfigRoot = $check.paths.sourceConfigRoot
+        privateConfigRoot = $privateConfigRoot
+        privateLogRoot = $privateLogRoot
         vrStartupPath = $check.paths.vrStartupPath
         supervisor = $null
     }
@@ -233,13 +231,12 @@ function Get-SteamVrHeadlessStatus {
 
         $configuration = Read-RunConfiguration -RunDirectory $runDirectory
         $supervisor = Get-RunSupervisor -RunDirectory $runDirectory -Configuration $configuration
-        $runtimeStartUtc = (ConvertTo-UtcDateTime $configuration.createdUtc).AddSeconds(-5)
         [pscustomobject]@{
             ok = $true
             action = 'status'
             runId = $RunId
             supervisorAlive = Get-SupervisorAlive -Supervisor $supervisor
-            runtimeProcesses = @(Get-SteamVrRuntimeProcesses -SteamVrRoot $configuration.steamVrRoot -SinceUtc $runtimeStartUtc)
+            runtimeProcesses = @(Get-SteamVrRuntimeProcesses -SteamVrRoot $configuration.steamVrRoot)
             run = Read-JsonShared -Path $statusPath
         }
     } catch {

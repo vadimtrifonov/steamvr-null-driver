@@ -10,10 +10,7 @@ function Invoke-RunCleanup {
         error = $null
         processStops = $null
         lockRemoved = $false
-        privateConfigRoot = [string]$Configuration.configRoot
-        privateLogRoot = [string]$Configuration.logRoot
     }
-    $runtimeStartUtc = (ConvertTo-UtcDateTime $Configuration.createdUtc).AddSeconds(-5)
 
     try {
         $null = Assert-ActiveRunOwnership -StateRoot $StateRoot -RunId ([string]$Configuration.runId) -RunDirectory $RunDirectory
@@ -25,9 +22,8 @@ function Invoke-RunCleanup {
     try {
         $result.processStops = Stop-SteamVrRuntime `
             -SteamVrRoot ([string]$Configuration.steamVrRoot) `
-            -SinceUtc $runtimeStartUtc `
-            -ConfigRoot ([string]$Configuration.configRoot) `
-            -LogRoot ([string]$Configuration.logRoot)
+            -PrivateConfigRoot ([string]$Configuration.privateConfigRoot) `
+            -PrivateLogRoot ([string]$Configuration.privateLogRoot)
     } catch {
         $result.error = "SteamVR process inspection or shutdown failed: $($_.Exception.Message)"
         return [pscustomobject]$result

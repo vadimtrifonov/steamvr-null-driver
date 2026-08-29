@@ -81,12 +81,12 @@ function Read-RunConfiguration {
         throw 'The run configuration ID does not match its directory.'
     }
 
-    if ([int]$configuration.schemaVersion -ne 2) {
+    if ([int]$configuration.schemaVersion -ne 3) {
         throw 'The run configuration has an unsupported schema version.'
     }
     foreach ($name in @(
         'createdUtc', 'deadlineUtc', 'steamRoot', 'steamVrRoot',
-        'sourceConfigRoot', 'configRoot', 'logRoot', 'vrStartupPath'
+        'sourceConfigRoot', 'privateConfigRoot', 'privateLogRoot', 'vrStartupPath'
     )) {
         if (-not [string]$configuration.$name) {
             throw "The run configuration is missing '$name'."
@@ -96,15 +96,15 @@ function Read-RunConfiguration {
     $null = ConvertTo-UtcDateTime $configuration.deadlineUtc
 
     $expectedSourceConfigRoot = ConvertTo-FullPath (Join-Path ([string]$configuration.steamRoot) 'config')
-    $expectedConfigRoot = ConvertTo-FullPath (Join-Path $RunDirectory 'config')
-    $expectedLogRoot = ConvertTo-FullPath (Join-Path $RunDirectory 'logs')
+    $expectedPrivateConfigRoot = ConvertTo-FullPath (Join-Path $RunDirectory 'config')
+    $expectedPrivateLogRoot = ConvertTo-FullPath (Join-Path $RunDirectory 'logs')
     if ((ConvertTo-FullPath ([string]$configuration.sourceConfigRoot)) -ne $expectedSourceConfigRoot) {
         throw 'The run configuration contains an unexpected source config root.'
     }
-    if ((ConvertTo-FullPath ([string]$configuration.configRoot)) -ne $expectedConfigRoot) {
+    if ((ConvertTo-FullPath ([string]$configuration.privateConfigRoot)) -ne $expectedPrivateConfigRoot) {
         throw 'The run configuration contains an unexpected private config path.'
     }
-    if ((ConvertTo-FullPath ([string]$configuration.logRoot)) -ne $expectedLogRoot) {
+    if ((ConvertTo-FullPath ([string]$configuration.privateLogRoot)) -ne $expectedPrivateLogRoot) {
         throw 'The run configuration contains an unexpected private log path.'
     }
     if (-not (Test-PathWithin -Path ([string]$configuration.vrStartupPath) -Root ([string]$configuration.steamVrRoot))) {
@@ -152,34 +152,6 @@ function Assert-ActiveRunOwnership {
         }
     }
     $active
-}
-
-function Get-PendingRunRecords {
-    param([Parameter(Mandatory)][string]$StateRoot)
-
-    $runsRoot = Join-Path $StateRoot 'runs'
-    if (-not (Test-Path -LiteralPath $runsRoot -PathType Container)) {
-        return @()
-    }
-
-    $pending = [System.Collections.Generic.List[object]]::new()
-    foreach ($directory in @(Get-ChildItem -LiteralPath $runsRoot -Directory)) {
-        try {
-            Assert-RunId -RunId $directory.Name
-            $statusPath = Join-Path $directory.FullName 'status.json'
-            if (-not (Test-Path -LiteralPath $statusPath -PathType Leaf)) {
-                $pending.Add([pscustomobject]@{ runId=$directory.Name; phase='unknown'; cleanupComplete=$false })
-                continue
-            }
-            $status = Read-JsonShared -Path $statusPath
-            if ($null -eq $status.PSObject.Properties['cleanupComplete'] -or -not [bool]$status.cleanupComplete) {
-                $pending.Add([pscustomobject]@{ runId=$directory.Name; phase=$status.phase; cleanupComplete=$false })
-            }
-        } catch {
-            $pending.Add([pscustomobject]@{ runId=$directory.Name; phase='unreadable'; cleanupComplete=$false; error=$_.Exception.Message })
-        }
-    }
-    @($pending)
 }
 
 function New-ActiveRunRecord {

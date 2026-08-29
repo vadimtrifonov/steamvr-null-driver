@@ -27,13 +27,15 @@ The normal SteamVR configuration remains available as the source. The helper doe
 
 Existing Steam processes can still update their own global client logs and Steam metadata. These Steam-owned changes are outside this contract.
 
-A ready run has these properties:
+Startup validation requires these properties:
 
 - The `null` server driver is loaded.
 - The active HMD belongs to `null`.
 - No other server driver is loaded or starts device activation.
-- `vrserver` and `vrcompositor` remain alive for five seconds.
+- The same `vrserver` and `vrcompositor` processes remain alive for five seconds.
 - Room Setup does not start.
+
+After readiness, the supervisor monitors the recorded `vrserver` and `vrcompositor` identities until stop or lease expiry. Runtime-wide validation occurs again during cleanup.
 
 Readiness is a process-level gate. It does not probe a scene application through OpenVR.
 
@@ -55,9 +57,9 @@ If process inspection or shutdown fails, cleanup retains the private state and j
 
 An unreadable path for a canonical SteamVR process is an inspection error. Other inaccessible Windows processes remain outside the ownership decision.
 
-`recover` operates only on a valid journal with an inactive supervisor. It refuses malformed or orphaned state.
+`recover` performs runtime cleanup only for the active journal and only when its supervisor is inactive. It removes inactive private journals because they do not own shared configuration or runtime processes.
 
-A supervisor crash disables automatic lease cleanup. The active lock blocks a new run until `recover` succeeds.
+A malformed active journal or an active lock without its journal requires manual inspection. A supervisor crash disables automatic lease cleanup. The active lock blocks a new run until `recover` succeeds.
 
 ## Safety rules
 
@@ -68,6 +70,7 @@ A supervisor crash disables automatic lease cleanup. The active lock blocks a ne
 - Leave an existing, unowned SteamVR runtime unchanged.
 - Keep Direct Display Mode disabled.
 - Keep all other tracking drivers and virtual controllers disabled.
+- Do not launch Room Setup or another SteamVR tool during a ready run.
 - Launch a child OpenVR application with `run.environment` when it must use the private paths.
 
 Competing start commands fail safely. Stop and recover commands require serialization.

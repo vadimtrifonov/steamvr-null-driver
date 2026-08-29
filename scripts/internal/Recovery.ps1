@@ -13,17 +13,14 @@ function Invoke-DeadRunCleanup {
         reason = 'manual-recovery'
         error = $cleanup.error
         deadlineUtc = $Configuration.deadlineUtc
-        environment = [pscustomobject][ordered]@{
-            VR_CONFIG_PATH = $Configuration.configRoot
-            VR_LOG_PATH = $Configuration.logRoot
-        }
+        environment = Get-OpenVrEnvironment `
+            -PrivateConfigRoot $Configuration.privateConfigRoot `
+            -PrivateLogRoot $Configuration.privateLogRoot
         evidence = $null
         processes = if ($cleanup.processStops) { @($cleanup.processStops.remaining) } else { @() }
         cleanup = [pscustomobject]@{
             processStops = $cleanup.processStops
             lockRemoved = $cleanup.lockRemoved
-            privateConfigRoot = $cleanup.privateConfigRoot
-            privateLogRoot = $cleanup.privateLogRoot
         }
     }
     $phase = if ($cleanup.complete) { 'recovered' } else { 'recovery-required' }
@@ -48,70 +45,61 @@ function Invoke-SteamVrHeadlessRecovery {
         return [pscustomobject]@{ ok=$false; action='recover'; recovered=@(); active=@(); errors=@([pscustomobject]@{runId=$null;error=$_.Exception.Message}) }
     }
 
+    if ($active) {
+        $activeRunId = [string]$active.runId
+        try {
+            $activeDirectory = Get-RunDirectory -StateRoot $StateRoot -RunId $activeRunId
+            if (-not (Test-Path -LiteralPath $activeDirectory -PathType Container)) {
+                throw 'The active-run lock has no run directory. Manual inspection is required.'
+            }
+
+            $configuration = Read-RunConfiguration -RunDirectory $activeDirectory
+            $statusPath = Join-Path $activeDirectory 'status.json'
+            $priorStatus = if (Test-Path -LiteralPath $statusPath -PathType Leaf) { Read-JsonShared -Path $statusPath } else { $null }
+
+            if ($priorStatus -and [bool]$priorStatus.cleanupComplete) {
+                $null = Remove-ActiveRunRecord -StateRoot $StateRoot -RunId $activeRunId
+                $active = $null
+                Remove-Item -LiteralPath $activeDirectory -Recurse -Force
+                $recovered.Add([pscustomobject]@{ runId=$activeRunId; result='removed completed active journal' })
+            } else {
+                $supervisor = Get-RunSupervisor -RunDirectory $activeDirectory -Configuration $configuration
+                if ($supervisor -and (Get-SupervisorAlive -Supervisor $supervisor)) {
+                    $activeRuns.Add([pscustomobject]@{ runId=$activeRunId; result='supervisor is active' })
+                } elseif (-not $supervisor -and (Test-SupervisorHandoffPending -RunDirectory $activeDirectory -Configuration $configuration)) {
+                    $activeRuns.Add([pscustomobject]@{ runId=$activeRunId; result='supervisor handoff is pending' })
+                } else {
+                    if ($supervisor) {
+                        $configuration.supervisor = $supervisor
+                    }
+                    $status = Invoke-DeadRunCleanup -RunDirectory $activeDirectory -StateRoot $StateRoot -Configuration $configuration
+                    if ($status.cleanupComplete) {
+                        $active = $null
+                        Remove-Item -LiteralPath $activeDirectory -Recurse -Force
+                        $recovered.Add([pscustomobject]@{ runId=$activeRunId; result='recovered active run' })
+                    } else {
+                        $errors.Add([pscustomobject]@{ runId=$activeRunId; error=$status.error })
+                    }
+                }
+            }
+        } catch {
+            $errors.Add([pscustomobject]@{ runId=$activeRunId; error=$_.Exception.Message })
+        }
+    }
+
     if (Test-Path -LiteralPath $runsRoot -PathType Container) {
         foreach ($directory in @(Get-ChildItem -LiteralPath $runsRoot -Directory)) {
+            if ($active -and $directory.Name -ceq [string]$active.runId) {
+                continue
+            }
             try {
                 Assert-RunId -RunId $directory.Name
-                $configuration = Read-RunConfiguration -RunDirectory $directory.FullName
-                $statusPath = Join-Path $directory.FullName 'status.json'
-                $priorStatus = if (Test-Path -LiteralPath $statusPath -PathType Leaf) { Read-JsonShared -Path $statusPath } else { $null }
-                $ownsActiveLock = $active -and [string]$active.runId -ceq [string]$configuration.runId
-
-                if ($priorStatus -and [bool]$priorStatus.cleanupComplete) {
-                    if ($ownsActiveLock) {
-                        $null = Remove-ActiveRunRecord -StateRoot $StateRoot -RunId ([string]$configuration.runId)
-                        $active = $null
-                    }
-                    Remove-Item -LiteralPath $directory.FullName -Recurse -Force
-                    $recovered.Add([pscustomobject]@{ runId=$configuration.runId; result='removed completed journal' })
-                    continue
-                }
-
-                if (-not $ownsActiveLock) {
-                    $errors.Add([pscustomobject]@{
-                        runId = $configuration.runId
-                        error = 'The unfinished run does not own the active-run lock. Automatic recovery refused it.'
-                    })
-                    continue
-                }
-
-                $supervisor = Get-RunSupervisor -RunDirectory $directory.FullName -Configuration $configuration
-                if ($supervisor -and (Get-SupervisorAlive -Supervisor $supervisor)) {
-                    $activeRuns.Add([pscustomobject]@{ runId=$configuration.runId; result='supervisor is active' })
-                    continue
-                }
-                if (-not $supervisor -and (Test-SupervisorHandoffPending -RunDirectory $directory.FullName -Configuration $configuration)) {
-                    $activeRuns.Add([pscustomobject]@{ runId=$configuration.runId; result='supervisor handoff is pending' })
-                    continue
-                }
-                if ($supervisor) {
-                    $configuration.supervisor = $supervisor
-                }
-
-                $status = Invoke-DeadRunCleanup -RunDirectory $directory.FullName -StateRoot $StateRoot -Configuration $configuration
-                if ($status.cleanupComplete) {
-                    $active = $null
-                    Remove-Item -LiteralPath $directory.FullName -Recurse -Force
-                    $recovered.Add([pscustomobject]@{ runId=$configuration.runId; result='recovered' })
-                } else {
-                    $errors.Add([pscustomobject]@{ runId=$configuration.runId; error=$status.error })
-                }
+                Remove-Item -LiteralPath $directory.FullName -Recurse -Force
+                $recovered.Add([pscustomobject]@{ runId=$directory.Name; result='removed inactive private journal' })
             } catch {
                 $errors.Add([pscustomobject]@{ runId=$directory.Name; error=$_.Exception.Message })
             }
         }
-    }
-
-    try {
-        $remainingActive = Get-ActiveRunRecord -StateRoot $StateRoot
-        if ($remainingActive) {
-            $activeDirectory = Get-RunDirectory -StateRoot $StateRoot -RunId ([string]$remainingActive.runId)
-            if (-not (Test-Path -LiteralPath $activeDirectory -PathType Container)) {
-                $errors.Add([pscustomobject]@{ runId=$remainingActive.runId; error='The active-run lock has no run directory. Manual inspection is required.' })
-            }
-        }
-    } catch {
-        $errors.Add([pscustomobject]@{ runId=$null; error=$_.Exception.Message })
     }
 
     Remove-EmptyStateDirectories -StateRoot $StateRoot

@@ -38,17 +38,17 @@ function Invoke-SteamVrHeadlessSupervisor {
         reason = $null
         error = $null
         deadlineUtc = $configuration.deadlineUtc
-        environment = [pscustomobject][ordered]@{
-            VR_CONFIG_PATH = $configuration.configRoot
-            VR_LOG_PATH = $configuration.logRoot
-        }
+        environment = Get-OpenVrEnvironment `
+            -PrivateConfigRoot $configuration.privateConfigRoot `
+            -PrivateLogRoot $configuration.privateLogRoot
         evidence = $null
         processes = @()
         cleanup = $null
     }
-    $runtimeStartUtc = (ConvertTo-UtcDateTime $configuration.createdUtc).AddSeconds(-5)
     $leaseDeadline = ConvertTo-UtcDateTime $configuration.deadlineUtc
-    $vrServerLog = Join-Path $configuration.logRoot 'vrserver.txt'
+    $vrServerLog = Join-Path $configuration.privateLogRoot 'vrserver.txt'
+    $serverRecord = $null
+    $compositorRecord = $null
     $outcome = 'failed'
 
     try {
@@ -65,13 +65,12 @@ function Invoke-SteamVrHeadlessSupervisor {
         Write-RunStatus -RunDirectory $runDirectory -RunId $RunId -Phase 'configuring' -Message 'Creating an isolated null-driver configuration.' -State $state | Out-Null
         $null = Initialize-PrivateHeadlessConfiguration `
             -SourceConfigRoot $configuration.sourceConfigRoot `
-            -ConfigRoot $configuration.configRoot `
-            -LogRoot $configuration.logRoot
+            -PrivateConfigRoot $configuration.privateConfigRoot `
+            -PrivateLogRoot $configuration.privateLogRoot
         if (@(Get-SteamVrRuntimeProcesses -SteamVrRoot $configuration.steamVrRoot).Count -gt 0) {
             throw 'SteamVR started while the private configuration was prepared.'
         }
 
-        $logCursor = New-TextCursor -Path $vrServerLog
         if ([DateTime]::UtcNow -ge $leaseDeadline) {
             $state.reason = 'lease-expired'
             $outcome = 'expired'
@@ -80,8 +79,8 @@ function Invoke-SteamVrHeadlessSupervisor {
         Write-RunStatus -RunDirectory $runDirectory -RunId $RunId -Phase 'starting' -Message 'Starting SteamVR.' -State $state | Out-Null
         [void](Start-VrStartupProcess `
             -Path $configuration.vrStartupPath `
-            -ConfigRoot $configuration.configRoot `
-            -LogRoot $configuration.logRoot)
+            -PrivateConfigRoot $configuration.privateConfigRoot `
+            -PrivateLogRoot $configuration.privateLogRoot)
 
         $startupDeadline = [DateTime]::UtcNow.AddSeconds([int]$configuration.startupTimeoutSeconds)
         do {
@@ -91,13 +90,18 @@ function Invoke-SteamVrHeadlessSupervisor {
                 throw 'The run lease expired during SteamVR startup.'
             }
 
-            $state.processes = @(Get-SteamVrRuntimeProcesses -SteamVrRoot $configuration.steamVrRoot -SinceUtc $runtimeStartUtc)
+            $state.processes = @(Get-SteamVrRuntimeProcesses -SteamVrRoot $configuration.steamVrRoot)
             if (@($state.processes | Where-Object { $_.name -eq 'steamvr_room_setup' }).Count -gt 0) {
                 throw 'SteamVR Room Setup started during headless startup.'
             }
-            $assessment = Get-VrLogAssessment -Text (Read-TextFromCursor -Path $vrServerLog -Cursor $logCursor)
-            $hasServer = @($state.processes | Where-Object { $_.name -eq 'vrserver' }).Count -gt 0
-            $hasCompositor = @($state.processes | Where-Object { $_.name -eq 'vrcompositor' }).Count -gt 0
+            $assessment = Get-VrLogAssessment -Text (Read-VrLogText -Path $vrServerLog)
+            $servers = @($state.processes | Where-Object { $_.name -eq 'vrserver' })
+            $compositors = @($state.processes | Where-Object { $_.name -eq 'vrcompositor' })
+            if ($servers.Count -gt 1 -or $compositors.Count -gt 1) {
+                throw 'More than one SteamVR server or compositor process started.'
+            }
+            $hasServer = $servers.Count -eq 1
+            $hasCompositor = $compositors.Count -eq 1
             $assessment | Add-Member -MemberType NoteProperty -Name serverRunning -Value $hasServer
             $assessment | Add-Member -MemberType NoteProperty -Name compositorRunning -Value $hasCompositor
             $state.evidence = $assessment
@@ -110,6 +114,8 @@ function Invoke-SteamVrHeadlessSupervisor {
                 throw 'SteamVR Room Setup launched during headless startup.'
             }
             if ($assessment.ready -and $hasServer -and $hasCompositor) {
+                $serverRecord = $servers[0]
+                $compositorRecord = $compositors[0]
                 break
             }
             Start-Sleep -Milliseconds 400
@@ -127,11 +133,28 @@ function Invoke-SteamVrHeadlessSupervisor {
                 throw 'The run lease expired during startup validation.'
             }
             Start-Sleep -Milliseconds 400
-            $state.processes = @(Get-SteamVrRuntimeProcesses -SteamVrRoot $configuration.steamVrRoot -SinceUtc $runtimeStartUtc)
-            $hasServer = @($state.processes | Where-Object { $_.name -eq 'vrserver' }).Count -gt 0
-            $hasCompositor = @($state.processes | Where-Object { $_.name -eq 'vrcompositor' }).Count -gt 0
-            $assessment = Get-VrLogAssessment -Text (Read-TextFromCursor -Path $vrServerLog -Cursor $logCursor)
-            if ($assessment.modeViolation -or $assessment.roomSetupDetected -or -not $hasServer -or -not $hasCompositor) {
+            $state.processes = @(Get-SteamVrRuntimeProcesses -SteamVrRoot $configuration.steamVrRoot)
+            if (@($state.processes | Where-Object { $_.name -eq 'steamvr_room_setup' }).Count -gt 0) {
+                throw 'SteamVR Room Setup started during startup validation.'
+            }
+
+            $servers = @($state.processes | Where-Object { $_.name -eq 'vrserver' })
+            $compositors = @($state.processes | Where-Object { $_.name -eq 'vrcompositor' })
+            $serverStable = $servers.Count -eq 1 -and (Test-ProcessRecordsMatch -First $servers[0] -Second $serverRecord)
+            $compositorStable = $compositors.Count -eq 1 -and (Test-ProcessRecordsMatch -First $compositors[0] -Second $compositorRecord)
+            $assessment = Get-VrLogAssessment -Text (Read-VrLogText -Path $vrServerLog)
+            $assessment | Add-Member -MemberType NoteProperty -Name serverRunning -Value $serverStable
+            $assessment | Add-Member -MemberType NoteProperty -Name compositorRunning -Value $compositorStable
+            $state.evidence = $assessment
+
+            if ($assessment.modeViolation) {
+                $drivers = @($assessment.unexpectedDrivers + $assessment.unexpectedHmdDrivers | Sort-Object -Unique) -join ', '
+                throw "Unexpected SteamVR driver or HMD mode detected during startup validation: $drivers"
+            }
+            if ($assessment.roomSetupDetected) {
+                throw 'SteamVR Room Setup launched during startup validation.'
+            }
+            if (-not $assessment.ready -or -not $serverStable -or -not $compositorStable) {
                 throw 'SteamVR did not remain in the expected null-only server and compositor mode during startup validation.'
             }
         }
@@ -150,25 +173,11 @@ function Invoke-SteamVrHeadlessSupervisor {
                 $outcome = 'expired'
                 break
             }
-
-            $state.processes = @(Get-SteamVrRuntimeProcesses -SteamVrRoot $configuration.steamVrRoot -SinceUtc $runtimeStartUtc)
-            if (@($state.processes | Where-Object { $_.name -eq 'steamvr_room_setup' }).Count -gt 0) {
-                throw 'SteamVR Room Setup started during the headless session.'
-            }
-            if (@($state.processes | Where-Object { $_.name -eq 'vrserver' }).Count -eq 0) {
+            if (-not (Test-ProcessRecordAlive -Record $serverRecord)) {
                 throw 'The owned vrserver process exited unexpectedly.'
             }
-            if (@($state.processes | Where-Object { $_.name -eq 'vrcompositor' }).Count -eq 0) {
+            if (-not (Test-ProcessRecordAlive -Record $compositorRecord)) {
                 throw 'The owned vrcompositor process exited unexpectedly.'
-            }
-            $assessment = Get-VrLogAssessment -Text (Read-TextFromCursor -Path $vrServerLog -Cursor $logCursor)
-            $state.evidence = $assessment
-            if ($assessment.modeViolation) {
-                $drivers = @($assessment.unexpectedDrivers + $assessment.unexpectedHmdDrivers | Sort-Object -Unique) -join ', '
-                throw "SteamVR changed to an unexpected driver or HMD mode: $drivers"
-            }
-            if ($assessment.roomSetupDetected) {
-                throw 'SteamVR Room Setup launched during the headless session.'
             }
             Start-Sleep -Seconds 2
         }
@@ -191,8 +200,6 @@ function Invoke-SteamVrHeadlessSupervisor {
             $state.cleanup = [pscustomobject]@{
                 processStops = $cleanup.processStops
                 lockRemoved = $cleanup.lockRemoved
-                privateConfigRoot = $cleanup.privateConfigRoot
-                privateLogRoot = $cleanup.privateLogRoot
             }
             $state.cleanupComplete = [bool]$cleanup.complete
             if (-not $cleanup.complete) {
