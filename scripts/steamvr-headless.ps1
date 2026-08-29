@@ -29,9 +29,11 @@ try {
                 -MaxDurationMinutes $MaxDurationMinutes
         }
         'status' {
+            if (-not $RunId) { throw 'status requires -RunId.' }
             Get-SteamVrHeadlessStatus -RunId $RunId -StateRoot $stateRoot
         }
         'stop' {
+            if (-not $RunId) { throw 'stop requires -RunId.' }
             Stop-SteamVrHeadlessRun -RunId $RunId -StateRoot $stateRoot
         }
     }

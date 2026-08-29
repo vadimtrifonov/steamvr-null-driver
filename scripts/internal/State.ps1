@@ -1,3 +1,18 @@
+$script:TerminalRunPhases = @('stopped', 'expired', 'failed', 'cleanup-required')
+$script:CleanTerminalRunPhases = @('stopped', 'expired', 'failed')
+
+function Test-RunPhaseTerminal {
+    param([AllowEmptyString()][string]$Phase)
+
+    $script:TerminalRunPhases -contains $Phase
+}
+
+function Test-RunPhaseClean {
+    param([AllowEmptyString()][string]$Phase)
+
+    $script:CleanTerminalRunPhases -contains $Phase
+}
+
 function Write-RunEvent {
     param(
         [Parameter(Mandatory)][string]$RunDirectory,
@@ -25,8 +40,6 @@ function New-RunStatus {
         message = $Message
         updatedUtc = Get-UtcText
         supervisor = $State.supervisor
-        ready = [bool]$State.ready
-        cleanupComplete = [bool]$State.cleanupComplete
         reason = $State.reason
         error = $State.error
         deadlineUtc = $State.deadlineUtc
@@ -79,7 +92,7 @@ function Read-RunConfiguration {
     if ([int]$stored.schemaVersion -ne 5) {
         throw 'The run configuration has an unsupported schema version.'
     }
-    foreach ($name in @('createdUtc', 'deadlineUtc', 'startupTimeoutSeconds', 'steamVrRoot')) {
+    foreach ($name in @('createdUtc', 'deadlineUtc', 'steamVrRoot')) {
         if (-not [string]$stored.$name) {
             throw "The run configuration is missing '$name'."
         }
@@ -87,22 +100,16 @@ function Read-RunConfiguration {
 
     $createdUtc = ConvertTo-UtcDateTime $stored.createdUtc
     $deadlineUtc = ConvertTo-UtcDateTime $stored.deadlineUtc
-    $startupTimeoutSeconds = [int]$stored.startupTimeoutSeconds
     if ($deadlineUtc -le $createdUtc) {
         throw 'The run deadline must be later than its creation time.'
     }
-    if ($startupTimeoutSeconds -lt 15 -or $startupTimeoutSeconds -gt 300) {
-        throw 'The run startup timeout is outside the supported range.'
-    }
 
     $steamVrRoot = ConvertTo-FullPath ([string]$stored.steamVrRoot)
-    Assert-SteamVrRuntimeLayout -SteamVrRoot $steamVrRoot
     [pscustomobject][ordered]@{
         schemaVersion = 5
         runId = [string]$stored.runId
         createdUtc = $createdUtc.ToString('o')
         deadlineUtc = $deadlineUtc.ToString('o')
-        startupTimeoutSeconds = $startupTimeoutSeconds
         steamVrRoot = $steamVrRoot
         privateConfigRoot = ConvertTo-FullPath (Join-Path $RunDirectory 'config')
         privateLogRoot = ConvertTo-FullPath (Join-Path $RunDirectory 'logs')
@@ -224,7 +231,6 @@ function Get-InactiveRunRecords {
             $record = [ordered]@{
                 runId = $directory.Name
                 phase = 'unknown'
-                cleanupComplete = $null
                 updatedUtc = $null
                 error = $null
             }
@@ -233,9 +239,6 @@ function Get-InactiveRunRecords {
                 try {
                     $status = Read-JsonShared -Path $statusPath
                     if ($status.phase) { $record.phase = [string]$status.phase }
-                    if ($null -ne $status.PSObject.Properties['cleanupComplete']) {
-                        $record.cleanupComplete = [bool]$status.cleanupComplete
-                    }
                     if ($status.updatedUtc) { $record.updatedUtc = [string]$status.updatedUtc }
                 } catch {
                     $record.error = $_.Exception.Message
@@ -271,39 +274,4 @@ function Remove-InactiveRunDirectories {
             $directory.Name
         }
     )
-}
-
-function Get-RunSupervisor {
-    param([Parameter(Mandatory)][string]$RunDirectory)
-
-    $launchPath = Join-Path $RunDirectory 'launch.json'
-    if (-not (Test-Path -LiteralPath $launchPath -PathType Leaf)) {
-        return $null
-    }
-    $launch = Read-JsonShared -Path $launchPath
-    if (-not $launch.supervisor.pid -or -not $launch.supervisor.path -or -not $launch.supervisor.creationUtc) {
-        throw 'The supervisor launch record is incomplete.'
-    }
-    $launch.supervisor
-}
-
-function Test-SupervisorHandoffPending {
-    param(
-        [Parameter(Mandatory)][string]$RunDirectory,
-        [Parameter(Mandatory)]$Configuration
-    )
-
-    if (Get-RunSupervisor -RunDirectory $RunDirectory) {
-        return $false
-    }
-    [DateTime]::UtcNow -lt (ConvertTo-UtcDateTime $Configuration.createdUtc).AddSeconds(15)
-}
-
-function Get-SupervisorAlive {
-    param([AllowNull()]$Supervisor)
-
-    if ($null -eq $Supervisor -or -not $Supervisor.pid) {
-        return $false
-    }
-    Test-ProcessRecordAlive -Record $Supervisor
 }

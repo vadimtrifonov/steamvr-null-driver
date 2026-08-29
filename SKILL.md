@@ -7,140 +7,130 @@ description: Start, inspect, and stop bounded SteamVR null-HMD sessions without 
 
 Use this skill directory as the working directory.
 
-## Contract
+## Workflow
 
-This helper supports one Windows account, one SteamVR installation, and one fixed state root. The state root is `%LOCALAPPDATA%\SteamVrHeadless`.
+Before a run, make sure that these conditions are true:
 
-Steam must already run under the same interactive account. SteamVR must be stopped before a run starts.
+- Steam runs in the same interactive Windows session.
+- SteamVR is stopped.
+- No SteamVR update is in progress.
+- Room Setup and other SteamVR tools are closed.
 
-Headless means that SteamVR uses its bundled `null` HMD. A compositor, a GPU, and an interactive Windows session remain necessary.
+Run lifecycle commands sequentially. Operate one run at a time.
 
-Each run generates a small `steamvr.vrsettings` file in its private run directory. The file forces `null`, disables other-driver activation, disables dashboard applications, and disables Direct Display Mode.
+### 1. Check the system
 
-SteamVR can add run-specific settings and application metadata under the private configuration path. These additions remain private to the run.
-
-The run also has private chaperone data and SteamVR logs. The helper exports these variables:
-
-- `VR_OVERRIDE`
-- `VR_CONFIG_PATH`
-- `VR_LOG_PATH`
-
-Pass `run.environment` to each child OpenVR application.
-
-The helper does not read or change the normal SteamVR settings or chaperone files. Existing Steam processes can update Steam-owned logs and metadata.
-
-The temporary chaperone file supplies zero seated and standing origins for universe `2`. Without this file, the tested null runtime launched Room Setup.
-
-The temporary origins are not physical room, floor, or boundary calibration.
-
-## Readiness
-
-Startup requires these properties:
-
-- The `null` server driver is loaded.
-- The active HMD belongs to `null`.
-- No other server driver loads or starts device activation.
-- Direct Display Mode does not start.
-- Room Setup does not start.
-- One `vrserver` and one `vrcompositor` remain unchanged for five seconds.
-
-After readiness, the supervisor monitors the recorded server and compositor identities. Cleanup examines the complete selected runtime root again.
-
-Readiness is a process-level gate. It does not probe a scene application through OpenVR.
-
-## Ownership and cleanup
-
-The active lock reserves the selected runtime. Each SteamVR process that starts under that runtime during the lease becomes owned.
-
-Cleanup uses this order:
-
-1. Request SteamVR shutdown through `vrmonitor://quit`.
-2. Stop the exact remaining runtime processes.
-3. Make sure that no runtime process remains.
-4. Remove the active lock.
-
-If process inspection or shutdown fails, cleanup retains the active lock and private evidence. The terminal phase is `cleanup-required`.
-
-An unreadable path for a known SteamVR process stops inspection. Other inaccessible Windows processes remain outside the ownership decision.
-
-Run `stop` again after you correct the process problem. A malformed active journal or an orphan lock requires manual inspection.
-
-The detached supervisor enforces the deadline while it remains operational. If the supervisor stops unexpectedly, `stop` performs stale-run cleanup.
-
-## Inactive journals
-
-`check` reports completed inactive journals in `inactiveRuns`. These journals do not own the runtime.
-
-A new start removes all inactive journals after it wins the active lock. The `start.prunedRuns` array reports their run IDs.
-
-A retained status remains available only until the next start. Use `stop -RunId` to remove one inactive journal earlier.
-
-## Safety rules
-
-- Operate one run at a time.
-- Run lifecycle commands sequentially.
-- Keep the returned run ID until cleanup completes.
-- Stop the run in a `finally` path after child work.
-- Leave SteamVR processes that existed before reservation unchanged.
-- Keep physical and virtual tracking drivers inactive.
-- Keep Room Setup and other SteamVR tools closed during the lease.
-- Update SteamVR only when no run is active.
-
-Competing starts fail safely. A nondefault state namespace is not supported.
-
-## Installation discovery
-
-The helper finds SteamVR through the Steam App 250820 registration. Automatic discovery supports exactly one complete registered installation.
-
-Supply the runtime root if registration is unavailable or ambiguous:
-
-```powershell
-pwsh -NoProfile -File scripts/steamvr-headless.ps1 check `
-  -SteamVrRoot "<SteamVR-root>"
-```
-
-The selected root must contain the server, compositor, monitor, startup executable, and bundled null driver.
-
-## Check
-
-`check` is optional and read-only:
+`check` is optional. `start` does the same authoritative preflight.
 
 ```powershell
 pwsh -NoProfile -File scripts/steamvr-headless.ps1 check
 ```
 
-`canStart=true` means that the runtime is stopped and no active lock exists. Examine `inactiveRuns` for retained private evidence.
+Continue when `ok=true` and `canStart=true`.
 
-## Start
+If registration is unavailable or ambiguous, add `-SteamVrRoot "<SteamVR-root>"` to `check` and `start`.
+
+### 2. Start SteamVR
 
 ```powershell
 pwsh -NoProfile -File scripts/steamvr-headless.ps1 start `
   -MaxDurationMinutes 30
 ```
 
-The maximum supported duration is 120 minutes. The duration includes startup.
+The duration includes startup. The permitted range is 1 through 120 minutes.
 
-Continue only when `ok=true`, `run.phase=ready`, and `run.evidence.ready=true`. Save `runId` and `run.environment`.
+Continue when `ok=true` and `run.phase=ready`. Save `runId` and `run.environment`.
 
-If start does not report readiness, inspect `status`. Then run `stop` with the returned run ID.
+If `start` fails, run `status`. Then run `stop` with the returned run ID.
 
-## Status
+### 3. Start a child application
+
+Pass all properties from `run.environment` to each child OpenVR application.
+
+The caller owns each child process. Stop child processes before you run `stop`.
+
+Readiness does not prove that a scene application can connect or render. Do a separate application test when you need that evidence.
+
+### 4. Check run status
 
 ```powershell
 pwsh -NoProfile -File scripts/steamvr-headless.ps1 status `
   -RunId "<run-id>"
 ```
 
-A usable run has `supervisorAlive=true`, `run.phase=ready`, and `run.evidence.ready=true`.
+A usable active run has `supervisorAlive=true` and `run.phase=ready`.
 
-## Stop
+### 5. Stop the run
+
+Always run `stop` in a `finally` path after child work.
 
 ```powershell
 pwsh -NoProfile -File scripts/steamvr-headless.ps1 stop `
   -RunId "<run-id>"
 ```
 
-`stop` handles a live supervisor, a dead supervisor, and an inactive private journal. Cleanup is complete when `ok=true`.
+Cleanup is complete when `ok=true`. Keep the run ID until cleanup is complete.
+
+If `run.phase=cleanup-required`, correct the reported process problem. Then run `stop` again with the same run ID.
+
+## Installation boundary
+
+The helper supports one Windows account, one selected SteamVR installation, and `%LOCALAPPDATA%\SteamVrHeadless` as its state root.
+
+The Steam client and SteamVR can be on different drives or in different Steam libraries.
+
+Automatic discovery uses the Steam App 250820 registration. It accepts exactly one complete registered installation.
+
+An explicit root must contain the startup, server, compositor, and monitor executables. It must also contain the bundled `null` driver.
+
+## Runtime boundary
+
+Each run has unique configuration and log directories. `run.environment` contains `VR_OVERRIDE`, `VR_CONFIG_PATH`, and `VR_LOG_PATH`.
+
+The private settings force `null` and disable multiple-driver activation. They also disable dashboard applications and Direct Display Mode.
+
+The helper does not read or change the normal SteamVR settings or chaperone files. Steam can update Steam-owned logs and application metadata.
+
+The private chaperone file supplies zero seated and standing origins for universe `2`. These origins only suppress Room Setup.
+
+CAUTION: Do not use the temporary origins as physical room, floor, or boundary calibration. They contain no physical calibration data.
+
+Startup requires these results:
+
+- The `null` server driver loads.
+- The active HMD belongs to `null`.
+- No other server driver loads or starts device activation.
+- Direct Display Mode does not start.
+- Room Setup does not start.
+- One `vrserver` and one `vrcompositor` remain unchanged for five seconds.
+
+After readiness, the supervisor checks only the recorded server and compositor identities. It does not continuously parse the startup log.
+
+Keep physical and virtual tracking drivers inactive during the lease. Keep Room Setup and other SteamVR tools closed.
+
+## Ownership and cleanup
+
+The active lock reserves the selected runtime. During cleanup, the helper owns each process whose executable is under that runtime root.
+
+Do not start SteamVR manually during an owned lease. Cleanup can stop a manually started runtime-root process.
+
+Cleanup requests `vrmonitor://quit`, stops exact remaining processes, and checks the complete runtime root. It removes the lock last.
+
+If process inspection or shutdown fails, cleanup retains the lock and private evidence.
+
+An unreadable path for a known SteamVR process stops inspection. Inaccessible unrelated Windows processes remain outside the ownership decision.
+
+The detached supervisor enforces the deadline while it operates. If the supervisor stops, use `stop` to clean the stale run.
+
+A malformed active journal or an orphan lock requires manual inspection.
+
+## Retained runs
+
+`check` reports completed journals in `inactiveRuns`. These journals do not own the runtime.
+
+A new lock owner removes retained journals before startup. `start.prunedRuns` reports their run IDs.
+
+Use `status -RunId` to inspect a retained journal. Use `stop -RunId` to remove it before the next start.
 
 ## Output
 

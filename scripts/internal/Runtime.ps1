@@ -25,7 +25,7 @@ function Get-RegisteredSteamVrRoots {
     @($roots | Sort-Object -Unique)
 }
 
-function Assert-SteamVrRuntimeLayout {
+function Assert-SteamVrCleanupLayout {
     param([Parameter(Mandatory)][string]$SteamVrRoot)
 
     $root = ConvertTo-FullPath $SteamVrRoot
@@ -33,14 +33,24 @@ function Assert-SteamVrRuntimeLayout {
         'bin\win64\vrstartup.exe',
         'bin\win64\vrserver.exe',
         'bin\win64\vrcompositor.exe',
-        'bin\win64\vrmonitor.exe',
-        'drivers\null\bin\win64\driver_null.dll'
+        'bin\win64\vrmonitor.exe'
     )
     $missing = @($requiredPaths | Where-Object {
         -not (Test-Path -LiteralPath (Join-Path $root $_) -PathType Leaf)
     })
     if ($missing.Count -gt 0) {
-        throw "The selected SteamVR root is incomplete. Missing: $($missing -join ', ')."
+        throw "The selected root is not a recognizable SteamVR runtime. Missing: $($missing -join ', ')."
+    }
+}
+
+function Assert-SteamVrRuntimeLayout {
+    param([Parameter(Mandatory)][string]$SteamVrRoot)
+
+    Assert-SteamVrCleanupLayout -SteamVrRoot $SteamVrRoot
+    $root = ConvertTo-FullPath $SteamVrRoot
+    $nullDriverPath = 'drivers\null\bin\win64\driver_null.dll'
+    if (-not (Test-Path -LiteralPath (Join-Path $root $nullDriverPath) -PathType Leaf)) {
+        throw "The selected SteamVR root has no bundled null driver at '$nullDriverPath'."
     }
 }
 
@@ -96,6 +106,16 @@ function ConvertTo-ProcessRecord {
         path = ConvertTo-FullPath ([string]$Process.ExecutablePath)
         creationUtc = ([DateTime]$Process.CreationDate).ToUniversalTime().ToString('o')
     }
+}
+
+function Get-SteamClientProcesses {
+    $sessionId = (Get-Process -Id $PID -ErrorAction Stop).SessionId
+    @(
+        Get-CimInstance Win32_Process -Filter "Name='steam.exe'" -ErrorAction Stop |
+            Where-Object { [int]$_.SessionId -eq [int]$sessionId } |
+            ForEach-Object { ConvertTo-ProcessRecord -Process $_ } |
+            Sort-Object pid
+    )
 }
 
 function Get-ProcessRecordById {
@@ -196,6 +216,7 @@ function Stop-SteamVrRuntime {
         [Parameter(Mandatory)][string]$PrivateLogRoot
     )
 
+    Assert-SteamVrCleanupLayout -SteamVrRoot $SteamVrRoot
     $graceful = [System.Collections.Generic.List[string]]::new()
     $forced = [System.Collections.Generic.List[string]]::new()
     $stopErrors = [System.Collections.Generic.List[string]]::new()

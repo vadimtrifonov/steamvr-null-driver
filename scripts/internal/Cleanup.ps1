@@ -62,8 +62,6 @@ function Invoke-DeadRunCleanup {
     $cleanup = Invoke-RunCleanup -RunDirectory $RunDirectory -StateRoot $StateRoot -Configuration $Configuration
     $state = [ordered]@{
         supervisor = $Supervisor
-        ready = $false
-        cleanupComplete = [bool]$cleanup.complete
         reason = 'stale-supervisor'
         error = $cleanup.error
         deadlineUtc = $Configuration.deadlineUtc

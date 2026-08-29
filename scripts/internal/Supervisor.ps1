@@ -1,3 +1,70 @@
+function Start-DetachedSupervisor {
+    param(
+        [Parameter(Mandatory)][string]$SupervisorScriptPath,
+        [Parameter(Mandatory)][string]$RunId,
+        [Parameter(Mandatory)][string]$StateRoot
+    )
+
+    $pwshPath = (Get-Process -Id $PID).Path
+    $quote = {
+        param([string]$Value)
+        '"' + $Value.Replace('"', '\"') + '"'
+    }
+    $commandLine = @(
+        & $quote $pwshPath
+        '-NoProfile'
+        '-NonInteractive'
+        '-ExecutionPolicy Bypass'
+        '-File'
+        & $quote (ConvertTo-FullPath $SupervisorScriptPath)
+        '-RunId'
+        & $quote $RunId
+        '-StateRoot'
+        & $quote (ConvertTo-FullPath $StateRoot)
+    ) -join ' '
+
+    $result = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = $commandLine } -ErrorAction Stop
+    if ($result.ReturnValue -ne 0) {
+        throw "Win32_Process.Create failed with return value $($result.ReturnValue)."
+    }
+    [int]$result.ProcessId
+}
+
+function Get-RunSupervisor {
+    param([Parameter(Mandatory)][string]$RunDirectory)
+
+    $launchPath = Join-Path $RunDirectory 'launch.json'
+    if (-not (Test-Path -LiteralPath $launchPath -PathType Leaf)) {
+        return $null
+    }
+    $launch = Read-JsonShared -Path $launchPath
+    if (-not $launch.supervisor.pid -or -not $launch.supervisor.path -or -not $launch.supervisor.creationUtc) {
+        throw 'The supervisor launch record is incomplete.'
+    }
+    $launch.supervisor
+}
+
+function Test-SupervisorHandoffPending {
+    param(
+        [Parameter(Mandatory)][string]$RunDirectory,
+        [Parameter(Mandatory)]$Configuration
+    )
+
+    if (Get-RunSupervisor -RunDirectory $RunDirectory) {
+        return $false
+    }
+    [DateTime]::UtcNow -lt (ConvertTo-UtcDateTime $Configuration.createdUtc).AddSeconds(15)
+}
+
+function Get-SupervisorAlive {
+    param([AllowNull()]$Supervisor)
+
+    if ($null -eq $Supervisor -or -not $Supervisor.pid) {
+        return $false
+    }
+    Test-ProcessRecordAlive -Record $Supervisor
+}
+
 function Assert-RunContinues {
     param(
         [Parameter(Mandatory)][string]$RunDirectory,
@@ -45,8 +112,6 @@ function Invoke-SteamVrHeadlessSupervisor {
 
     $state = [ordered]@{
         supervisor = $supervisor
-        ready = $false
-        cleanupComplete = $false
         reason = $null
         error = $null
         deadlineUtc = $configuration.deadlineUtc
@@ -66,6 +131,7 @@ function Invoke-SteamVrHeadlessSupervisor {
     try {
         Write-RunStatus -RunDirectory $runDirectory -RunId $RunId -Phase 'preflight' -Message 'Checking exclusive SteamVR ownership.' -State $state | Out-Null
         Assert-RunContinues -RunDirectory $runDirectory -LeaseDeadline $leaseDeadline
+        Assert-SteamVrRuntimeLayout -SteamVrRoot $configuration.steamVrRoot
         if (@(Get-SteamVrRuntimeProcesses -SteamVrRoot $configuration.steamVrRoot).Count -gt 0) {
             throw 'A SteamVR process started after the run reserved the runtime.'
         }
@@ -86,7 +152,7 @@ function Invoke-SteamVrHeadlessSupervisor {
             -PrivateConfigRoot $configuration.privateConfigRoot `
             -PrivateLogRoot $configuration.privateLogRoot)
 
-        $startupDeadline = [DateTime]::UtcNow.AddSeconds([int]$configuration.startupTimeoutSeconds)
+        $startupDeadline = [DateTime]::UtcNow.AddSeconds($script:StartupTimeoutSeconds)
         $readySince = $null
         $startupValidated = $false
         do {
@@ -149,7 +215,6 @@ function Invoke-SteamVrHeadlessSupervisor {
             throw 'SteamVR did not establish the expected null-only server and compositor before the startup timeout.'
         }
 
-        $state.ready = $true
         Write-RunStatus -RunDirectory $runDirectory -RunId $RunId -Phase 'ready' -Message 'SteamVR is running with the null HMD and compositor.' -State $state | Out-Null
 
         while ($true) {
@@ -174,7 +239,6 @@ function Invoke-SteamVrHeadlessSupervisor {
             $outcome = 'failed'
         }
     } finally {
-        $state.ready = $false
         $null = Write-RunStatusBestEffort -RunDirectory $runDirectory -RunId $RunId -Phase 'stopping' -Message 'Stopping the owned SteamVR runtime.' -State $state
 
         try {
@@ -183,7 +247,6 @@ function Invoke-SteamVrHeadlessSupervisor {
                 processStops = $cleanup.processStops
                 lockRemoved = $cleanup.lockRemoved
             }
-            $state.cleanupComplete = [bool]$cleanup.complete
             if (-not $cleanup.complete) {
                 $outcome = 'cleanup-required'
                 if (-not $state.error) {
@@ -191,7 +254,6 @@ function Invoke-SteamVrHeadlessSupervisor {
                 }
             }
         } catch {
-            $state.cleanupComplete = $false
             $outcome = 'cleanup-required'
             if (-not $state.error) {
                 $state.error = $_.Exception.Message
