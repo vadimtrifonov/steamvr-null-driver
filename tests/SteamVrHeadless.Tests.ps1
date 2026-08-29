@@ -105,6 +105,20 @@ try {
     Assert-True ($convertedUtc -gt [DateTime]::UtcNow) 'A future UTC deadline became expired during conversion.'
     Complete-Test 'UTC timestamp conversion'
 
+    $missingParent = Join-Path $testRoot 'missing-json-parent'
+    $atomicWriteFailed = $false
+    try {
+        & $module {
+            param($Path)
+            Write-JsonAtomic -Path $Path -Value ([pscustomobject]@{ value='test' })
+        } (Join-Path $missingParent 'state.json')
+    } catch {
+        $atomicWriteFailed = $true
+    }
+    Assert-True $atomicWriteFailed 'An atomic state write created a missing run directory.'
+    Assert-True (-not (Test-Path -LiteralPath $missingParent)) 'An atomic state write recreated a deleted run directory.'
+    Complete-Test 'atomic state writes require an existing run directory'
+
     $chaperone = (& $module { Get-TemporaryChaperoneText }) | ConvertFrom-Json
     Assert-Equal $chaperone.jsonid 'chaperone_info' 'The temporary chaperone identifier is invalid.'
     Assert-Equal $chaperone.version 5 'The temporary chaperone version is invalid.'
@@ -168,20 +182,20 @@ Active HMD set to tomorrow_headset.Serial 1
         $script:fixtureSteamVrRoots = @($FixtureRuntime)
         Set-Item -Path Function:Get-RegisteredSteamVrRoots -Value { @($script:fixtureSteamVrRoots) }
         try {
-            $registered = Resolve-SteamVrPaths
-            $explicit = Resolve-SteamVrPaths -SteamVrRoot $FixtureRuntime
+            $registered = Resolve-SteamVrRoot
+            $explicit = Resolve-SteamVrRoot -SteamVrRoot $FixtureRuntime
             $script:fixtureSteamVrRoots = @($FixtureRuntime, $FixtureSecondRuntime)
             $ambiguousRejected = $false
-            try { $null = Resolve-SteamVrPaths } catch { $ambiguousRejected = $true }
+            try { $null = Resolve-SteamVrRoot } catch { $ambiguousRejected = $true }
             [pscustomobject]@{ registered=$registered;explicit=$explicit;ambiguousRejected=$ambiguousRejected }
         } finally {
             Set-Item -Path Function:Get-RegisteredSteamVrRoots -Value $originalSteamVrRoots
             Remove-Variable -Name fixtureSteamVrRoots -Scope Script -ErrorAction SilentlyContinue
         }
     } $fakeRuntime $secondRuntime
-    Assert-Equal $discovery.registered.steamVrRoot ([IO.Path]::GetFullPath($fakeRuntime)) 'Automatic discovery did not use Steam App 250820 registration.'
+    Assert-Equal $discovery.registered ([IO.Path]::GetFullPath($fakeRuntime)) 'Automatic discovery did not use Steam App 250820 registration.'
     Complete-Test 'automatic registered SteamVR discovery'
-    Assert-Equal $discovery.explicit.steamVrRoot ([IO.Path]::GetFullPath($fakeRuntime)) 'Explicit SteamVR discovery changed the runtime root.'
+    Assert-Equal $discovery.explicit ([IO.Path]::GetFullPath($fakeRuntime)) 'Explicit SteamVR discovery changed the runtime root.'
     Complete-Test 'explicit SteamVR root discovery'
     Assert-True $discovery.ambiguousRejected 'Automatic discovery selected one of multiple registered SteamVR installations.'
     Complete-Test 'ambiguous SteamVR discovery is refused'
@@ -190,13 +204,12 @@ Active HMD set to tomorrow_headset.Serial 1
     New-Item -ItemType Directory -Path (Join-Path $incompleteRuntime 'bin\win64') -Force | Out-Null
     [System.IO.File]::WriteAllText((Join-Path $incompleteRuntime 'bin\win64\vrstartup.exe'), '')
     $incompleteRejected = $false
-    try { $null = & $module { param($Root) Resolve-SteamVrPaths -SteamVrRoot $Root } $incompleteRuntime } catch { $incompleteRejected = $true }
+    try { $null = & $module { param($Root) Resolve-SteamVrRoot -SteamVrRoot $Root } $incompleteRuntime } catch { $incompleteRejected = $true }
     Assert-True $incompleteRejected 'An incomplete SteamVR root was accepted.'
     Complete-Test 'incomplete SteamVR root rejection'
 
     $cleanupOnlyRuntime = Join-Path $testRoot 'CleanupOnlySteamVR'
     foreach ($relativePath in @(
-        'bin\win64\vrstartup.exe',
         'bin\win64\vrserver.exe',
         'bin\win64\vrcompositor.exe',
         'bin\win64\vrmonitor.exe'
@@ -212,7 +225,7 @@ Active HMD set to tomorrow_headset.Serial 1
         try { Assert-SteamVrRuntimeLayout -SteamVrRoot $Root } catch { $launchAccepted = $false }
         [pscustomobject]@{ launchAccepted=$launchAccepted }
     } $cleanupOnlyRuntime
-    Assert-True (-not $cleanupShape.launchAccepted) 'A cleanup-only root was accepted for startup without its null driver.'
+    Assert-True (-not $cleanupShape.launchAccepted) 'A cleanup-only root was accepted for startup without its startup executable and null driver.'
     Complete-Test 'launch and cleanup layouts are separate'
 
     $privateFixtureRoot = Join-Path $testRoot 'private-fixture'
@@ -252,7 +265,7 @@ Active HMD set to tomorrow_headset.Serial 1
     Assert-Equal $journalConfiguration.privateConfigRoot ([IO.Path]::GetFullPath((Join-Path $journalRun 'config'))) 'The journal did not derive its private config path.'
     Assert-Equal $journalConfiguration.privateLogRoot ([IO.Path]::GetFullPath((Join-Path $journalRun 'logs'))) 'The journal did not derive its private log path.'
     Assert-Equal $journalConfiguration.vrStartupPath ([IO.Path]::GetFullPath((Join-Path $fakeRuntime 'bin\win64\vrstartup.exe'))) 'The journal did not derive its startup path.'
-    Complete-Test 'journal derives run paths'
+    Complete-Test 'run configuration derives private paths'
 
     $unsafeRunId = [Guid]::NewGuid().ToString('N')
     $unsafeStateRoot = Join-Path $testRoot 'unsafe-journal-state'
@@ -286,6 +299,8 @@ Active HMD set to tomorrow_headset.Serial 1
     $check = Invoke-SteamVrHeadlessCheck -SteamVrRoot $fakeRuntime -StateRoot $stateRoot
     Assert-True $check.ok 'The read-only check failed for valid fixture paths.'
     Assert-True $check.canStart 'The read-only check rejected an idle valid fixture.'
+    Assert-Equal $check.steamVrRoot ([IO.Path]::GetFullPath($fakeRuntime)) 'The read-only check did not return the selected runtime root.'
+    Assert-True ($null -eq $check.PSObject.Properties['paths']) 'The read-only check returned an unnecessary paths wrapper.'
     Assert-Equal $check.steamProcesses.Count 1 'The read-only check did not report the Steam client.'
     Assert-True ($null -eq $check.PSObject.Properties['invariant']) 'The read-only check returned duplicated invariant metadata.'
     Complete-Test 'Steam client prerequisite is visible'
@@ -318,7 +333,7 @@ Active HMD set to tomorrow_headset.Serial 1
     Assert-True $check.canStart 'An inactive private journal blocked an otherwise safe start.'
     Assert-Equal $check.inactiveRuns.Count 1 'The read-only check did not report the inactive journal.'
     Assert-Equal $check.inactiveRuns[0].phase 'expired' 'The read-only check lost the inactive journal phase.'
-    Complete-Test 'inactive journals are visible but do not block preflight'
+    Complete-Test 'retained runs are visible but do not block preflight'
 
     $victimDirectory = Join-Path $stateRoot 'victim'
     New-Item -ItemType Directory -Path $victimDirectory -Force | Out-Null
@@ -458,6 +473,33 @@ Active HMD set to tomorrow_headset.Serial 1
     }
     Complete-Test 'runtime stops before lock removal'
 
+    $activeStatusState = Join-Path $testRoot 'active-status-state'
+    $activeStatusRunId = [Guid]::NewGuid().ToString('N')
+    $activeStatusRun = Join-Path (Join-Path $activeStatusState 'runs') $activeStatusRunId
+    New-Item -ItemType Directory -Path $activeStatusRun -Force | Out-Null
+    $activeStatusConfiguration = Write-FixtureRunConfiguration `
+        -RunDirectory $activeStatusRun `
+        -Configuration (New-FixtureRunConfiguration -RunId $activeStatusRunId -SteamVrRoot $fakeRuntime)
+    [pscustomobject]@{ runId=$activeStatusRunId } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $activeStatusState 'active-run.json') -Encoding utf8NoBOM
+    $activeStatusSupervisor = & $module { Get-CurrentProcessRecord }
+    [pscustomobject]@{
+        runId = $activeStatusRunId
+        phase = 'ready'
+        supervisor = $activeStatusSupervisor
+    } | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $activeStatusRun 'status.json') -Encoding utf8NoBOM
+    $activeStatus = Get-SteamVrHeadlessStatus -RunId $activeStatusRunId -StateRoot $activeStatusState
+    Assert-True $activeStatus.ok 'Status could not inspect active run state.'
+    Assert-True $activeStatus.active 'Status did not report exact active-lock ownership.'
+    Assert-True $activeStatus.supervisorAlive 'Status did not find the self-registered supervisor.'
+    Assert-Equal $activeStatus.runtimeProcesses.Count 0 'Status reported unexpected active runtime processes.'
+    $activeStatusCleanup = & $module {
+        param($RunDirectory, $StateRoot, $Configuration)
+        Invoke-RunCleanup -RunDirectory $RunDirectory -StateRoot $StateRoot -Configuration $Configuration
+    } $activeStatusRun $activeStatusState $activeStatusConfiguration
+    Assert-True $activeStatusCleanup.complete 'The active status fixture did not clean successfully.'
+    Remove-Item -LiteralPath $activeStatusState -Recurse -Force
+    Complete-Test 'status separates active observation from retained state'
+
     $contradictoryState = Join-Path $testRoot 'contradictory-terminal-state'
     $contradictoryRunId = [Guid]::NewGuid().ToString('N')
     $contradictoryRun = Join-Path (Join-Path $contradictoryState 'runs') $contradictoryRunId
@@ -483,6 +525,8 @@ Active HMD set to tomorrow_headset.Serial 1
         -SupervisorScriptPath $supervisorScript
     Assert-True (-not $startResult.ok) 'The invalid startup executable did not fail the detached run.'
     Assert-Equal $startResult.run.phase 'failed' 'The detached supervisor did not report a controlled failure.'
+    Assert-True ($null -eq $startResult.PSObject.Properties['prunedRuns']) 'Start returned internal pruning details.'
+    Assert-True ($null -eq $startResult.run.PSObject.Properties['reason']) 'The run status retained a duplicate reason field.'
     Assert-True ($null -eq $startResult.run.PSObject.Properties['cleanupComplete']) 'The run status retained a duplicate cleanup-complete flag.'
     Assert-True $startResult.run.cleanup.lockRemoved 'The detached supervisor did not remove its active lock.'
     Assert-Equal $startResult.run.environment.VR_OVERRIDE ([IO.Path]::GetFullPath($fakeRuntime)) 'The run did not report its runtime override.'
@@ -492,24 +536,30 @@ Active HMD set to tomorrow_headset.Serial 1
     Assert-True ($null -eq $storedFailedRun.PSObject.Properties['supervisor']) 'The supervisor rewrote the immutable run configuration.'
     Assert-True ($null -eq $storedFailedRun.PSObject.Properties['startupTimeoutSeconds']) 'The stored run configuration contains a fixed startup timeout.'
     Assert-True ($null -eq $storedFailedRun.PSObject.Properties['privateConfigRoot']) 'The stored run configuration contains a derived path.'
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $failedRunDirectory 'launch.json'))) 'The detached supervisor created a separate launch record.'
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $failedRunDirectory 'events.log'))) 'The detached supervisor created a duplicate event log.'
     Assert-True (-not (Test-Path -LiteralPath (Join-Path $stateRoot 'active-run.json'))) 'The detached failure left an active-run lock.'
+    $failedStatus = Get-SteamVrHeadlessStatus -RunId $startResult.runId -StateRoot $stateRoot
+    Assert-True $failedStatus.ok 'Status could not read a retained completed run.'
+    Assert-True (-not $failedStatus.active) 'Status reported a retained run as active.'
+    Assert-True (-not $failedStatus.supervisorAlive) 'Status reported a retained supervisor as active.'
+    Assert-Equal $failedStatus.runtimeProcesses.Count 0 'Status attributed current runtime processes to a retained run.'
     $failedCheck = Invoke-SteamVrHeadlessCheck -SteamVrRoot $fakeRuntime -StateRoot $stateRoot
-    Assert-Equal $failedCheck.inactiveRuns.Count 1 'The completed failure journal was invisible to check.'
+    Assert-Equal $failedCheck.inactiveRuns.Count 1 'The retained failed run was invisible to check.'
     Complete-Test 'detached supervisor failure cleanup'
 
     $pruneRunId = [Guid]::NewGuid().ToString('N')
     $pruneRun = Join-Path (Join-Path $stateRoot 'runs') $pruneRunId
     New-Item -ItemType Directory -Path $pruneRun -Force | Out-Null
     & $module { param($State, $Id) New-ActiveRunRecord -StateRoot $State -RunId $Id } $stateRoot $pruneRunId
-    $pruned = @(& $module {
+    & $module {
         param($State, $Id, $Directory)
         Remove-InactiveRunDirectories -StateRoot $State -ActiveRunId $Id -ActiveRunDirectory $Directory
-    } $stateRoot $pruneRunId $pruneRun)
-    Assert-True ($pruned -contains $startResult.runId) 'A new lock owner did not prune the completed inactive journal.'
-    Assert-True (-not (Test-Path -LiteralPath $failedRunDirectory)) 'The completed inactive journal remained after pruning.'
+    } $stateRoot $pruneRunId $pruneRun
+    Assert-True (-not (Test-Path -LiteralPath $failedRunDirectory)) 'A new lock owner did not remove the retained run state.'
     & $module { param($State, $Id) Remove-ActiveRunRecord -StateRoot $State -RunId $Id } $stateRoot $pruneRunId | Out-Null
     Remove-Item -LiteralPath $pruneRun -Recurse -Force
-    Complete-Test 'new owner prunes inactive journals'
+    Complete-Test 'new owner removes retained runs'
 
     $staleState = Join-Path $testRoot 'stale-state'
     $staleRunId = [Guid]::NewGuid().ToString('N')
@@ -556,33 +606,20 @@ Active HMD set to tomorrow_headset.Serial 1
     [pscustomobject]@{ runId=$orphanRunId } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $orphanState 'active-run.json') -Encoding utf8NoBOM
     $orphanResult = Stop-SteamVrHeadlessRun -RunId $orphanRunId -StateRoot $orphanState
     Assert-True (-not $orphanResult.ok) 'An orphan active-run lock reported successful stop.'
-    Assert-True (Test-Path -LiteralPath (Join-Path $orphanState 'active-run.json')) 'An orphan active-run lock was removed without its journal.'
+    Assert-True (Test-Path -LiteralPath (Join-Path $orphanState 'active-run.json')) 'An orphan active-run lock was removed without its run state.'
     Complete-Test 'orphan active-run lock is refused'
 
-    $handoffState = Join-Path $testRoot 'handoff-state'
-    $handoffRunId = [Guid]::NewGuid().ToString('N')
-    $handoffRun = Join-Path (Join-Path $handoffState 'runs') $handoffRunId
-    New-Item -ItemType Directory -Path $handoffRun -Force | Out-Null
-    $handoffConfiguration = New-FixtureRunConfiguration -RunId $handoffRunId -SteamVrRoot $fakeRuntime
-    $null = Write-FixtureRunConfiguration -RunDirectory $handoffRun -Configuration $handoffConfiguration
-    [pscustomobject]@{ runId=$handoffRunId } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $handoffState 'active-run.json') -Encoding utf8NoBOM
-    $handoffResult = Stop-SteamVrHeadlessRun -RunId $handoffRunId -StateRoot $handoffState
-    Assert-True (-not $handoffResult.ok) 'Stop treated an in-progress handoff as stale.'
-    Assert-True ($handoffResult.error -match 'handoff') 'Stop did not report the pending handoff.'
-    Assert-True (Test-Path -LiteralPath (Join-Path $handoffState 'active-run.json')) 'Stop removed a pending handoff lock.'
-    Complete-Test 'pending supervisor handoff is retained'
-
-    $preflightState = Join-Path $testRoot 'preflight-state'
-    $preflightRunId = [Guid]::NewGuid().ToString('N')
-    $preflightRun = Join-Path (Join-Path $preflightState 'runs') $preflightRunId
-    New-Item -ItemType Directory -Path $preflightRun -Force | Out-Null
-    $preflightConfiguration = New-FixtureRunConfiguration -RunId $preflightRunId -SteamVrRoot $fakeRuntime -CreatedUtc ([DateTime]::UtcNow.AddMinutes(-1))
-    $null = Write-FixtureRunConfiguration -RunDirectory $preflightRun -Configuration $preflightConfiguration
-    [pscustomobject]@{ runId=$preflightRunId } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $preflightState 'active-run.json') -Encoding utf8NoBOM
-    $preflightResult = Stop-SteamVrHeadlessRun -RunId $preflightRunId -StateRoot $preflightState
-    Assert-True $preflightResult.ok 'Stop did not clean a pre-configuration interruption.'
-    Assert-True (-not (Test-Path -LiteralPath $preflightState)) 'Pre-configuration stop left state artifacts.'
-    Complete-Test 'pre-configuration interruption stop'
+    $unregisteredState = Join-Path $testRoot 'unregistered-supervisor-state'
+    $unregisteredRunId = [Guid]::NewGuid().ToString('N')
+    $unregisteredRun = Join-Path (Join-Path $unregisteredState 'runs') $unregisteredRunId
+    New-Item -ItemType Directory -Path $unregisteredRun -Force | Out-Null
+    $unregisteredConfiguration = New-FixtureRunConfiguration -RunId $unregisteredRunId -SteamVrRoot $fakeRuntime
+    $null = Write-FixtureRunConfiguration -RunDirectory $unregisteredRun -Configuration $unregisteredConfiguration
+    [pscustomobject]@{ runId=$unregisteredRunId } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $unregisteredState 'active-run.json') -Encoding utf8NoBOM
+    $unregisteredResult = Stop-SteamVrHeadlessRun -RunId $unregisteredRunId -StateRoot $unregisteredState
+    Assert-True $unregisteredResult.ok 'Stop did not clean a run before supervisor registration.'
+    Assert-True (-not (Test-Path -LiteralPath $unregisteredState)) 'Pre-registration stop left state artifacts.'
+    Complete-Test 'stop cleans an unregistered supervisor immediately'
 
     $currentSupervisor = & $module { Get-CurrentProcessRecord }
     $reusedIdentity = [pscustomobject]@{
@@ -610,28 +647,32 @@ Active HMD set to tomorrow_headset.Serial 1
     New-Item -ItemType Directory -Path $malformedActiveRun -Force | Out-Null
     [pscustomobject]@{ runId=$malformedActiveRunId } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $malformedActiveState 'active-run.json') -Encoding utf8NoBOM
     $malformedActiveResult = Stop-SteamVrHeadlessRun -RunId $malformedActiveRunId -StateRoot $malformedActiveState
-    Assert-True (-not $malformedActiveResult.ok) 'A malformed active journal reported successful stop.'
-    Assert-True (Test-Path -LiteralPath $malformedActiveRun) 'Stop deleted a malformed active journal.'
-    Assert-True (Test-Path -LiteralPath (Join-Path $malformedActiveState 'active-run.json')) 'Stop removed the lock for a malformed active journal.'
-    Complete-Test 'malformed active journal is refused'
+    Assert-True (-not $malformedActiveResult.ok) 'Malformed active state reported successful stop.'
+    Assert-True (Test-Path -LiteralPath $malformedActiveRun) 'Stop deleted malformed active state.'
+    Assert-True (Test-Path -LiteralPath (Join-Path $malformedActiveState 'active-run.json')) 'Stop removed the lock for malformed active state.'
+    Complete-Test 'malformed active state is refused'
 
     $cancelState = Join-Path $testRoot 'cancel-state'
     $cancelRunId = [Guid]::NewGuid().ToString('N')
     $cancelRun = Join-Path (Join-Path $cancelState 'runs') $cancelRunId
     New-Item -ItemType Directory -Path $cancelRun -Force | Out-Null
     $cancelConfiguration = New-FixtureRunConfiguration -RunId $cancelRunId -SteamVrRoot $fakeRuntime -CreatedUtc ([DateTime]::UtcNow.AddMinutes(-1))
-    $null = Write-FixtureRunConfiguration -RunDirectory $cancelRun -Configuration $cancelConfiguration
+    $cancelRuntimeConfiguration = Write-FixtureRunConfiguration -RunDirectory $cancelRun -Configuration $cancelConfiguration
     [pscustomobject]@{ runId=$cancelRunId } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $cancelState 'active-run.json') -Encoding utf8NoBOM
-    $cancelSupervisor = & $module { Get-CurrentProcessRecord }
-    [pscustomobject]@{ supervisor=$cancelSupervisor } | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $cancelRun 'launch.json') -Encoding utf8NoBOM
     'requested' | Set-Content -LiteralPath (Join-Path $cancelRun 'stop.request') -Encoding utf8NoBOM
     Invoke-SteamVrHeadlessSupervisor -RunId $cancelRunId -StateRoot $cancelState
     $cancelStatus = Get-Content -Raw -LiteralPath (Join-Path $cancelRun 'status.json') | ConvertFrom-Json
-    Assert-Equal $cancelStatus.phase 'stopped' 'A pre-start stop request did not stop the supervisor.'
-    Assert-Equal $cancelStatus.reason 'requested' 'A pre-start stop request lost its reason.'
-    Assert-True ($null -eq $cancelStatus.PSObject.Properties['cleanupComplete']) 'A pre-start stop retained a duplicate cleanup-complete flag.'
-    Assert-True (-not (Test-Path -LiteralPath (Join-Path $cancelState 'active-run.json'))) 'A pre-start stop request left its active lock.'
-    Complete-Test 'stop request cancels startup'
+    Assert-Equal $cancelStatus.phase 'starting' 'A pre-start stop request allowed the supervisor to enter runtime startup.'
+    Assert-True ($null -ne $cancelStatus.supervisor.pid) 'The supervisor did not register itself in the initial status.'
+    Assert-True (-not (Test-Path -LiteralPath $cancelRuntimeConfiguration.privateConfigRoot)) 'A pre-start stop request created private runtime configuration.'
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $cancelRun 'launch.json'))) 'Supervisor self-registration created a separate launch record.'
+    $cancelCleanup = & $module {
+        param($RunDirectory, $StateRoot, $Configuration)
+        Invoke-RunCleanup -RunDirectory $RunDirectory -StateRoot $StateRoot -Configuration $Configuration
+    } $cancelRun $cancelState $cancelRuntimeConfiguration
+    Assert-True $cancelCleanup.complete 'The stopped pre-start supervisor left state that could not be cleaned.'
+    Remove-Item -LiteralPath $cancelState -Recurse -Force
+    Complete-Test 'stop marker prevents supervisor startup'
 
     $leaseState = Join-Path $testRoot 'lease-state'
     $leaseRunId = [Guid]::NewGuid().ToString('N')
@@ -640,11 +681,11 @@ Active HMD set to tomorrow_headset.Serial 1
     $leaseConfiguration = New-FixtureRunConfiguration -RunId $leaseRunId -SteamVrRoot $fakeRuntime -CreatedUtc ([DateTime]::UtcNow.AddMinutes(-2)) -DeadlineUtc ([DateTime]::UtcNow.AddMinutes(-1))
     $null = Write-FixtureRunConfiguration -RunDirectory $leaseRun -Configuration $leaseConfiguration
     [pscustomobject]@{ runId=$leaseRunId } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $leaseState 'active-run.json') -Encoding utf8NoBOM
-    $leaseSupervisor = & $module { Get-CurrentProcessRecord }
-    [pscustomobject]@{ supervisor=$leaseSupervisor } | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $leaseRun 'launch.json') -Encoding utf8NoBOM
     Invoke-SteamVrHeadlessSupervisor -RunId $leaseRunId -StateRoot $leaseState
     $leaseStatus = Get-Content -Raw -LiteralPath (Join-Path $leaseRun 'status.json') | ConvertFrom-Json
     Assert-Equal $leaseStatus.phase 'expired' 'An expired lease entered normal startup.'
+    Assert-True ($null -ne $leaseStatus.supervisor.pid) 'The expired supervisor did not self-register in status.'
+    Assert-True ($null -eq $leaseStatus.PSObject.Properties['reason']) 'The expired status retained a duplicate reason field.'
     Assert-True ($null -eq $leaseStatus.PSObject.Properties['cleanupComplete']) 'An expired lease retained a duplicate cleanup-complete flag.'
     Assert-True (-not (Test-Path -LiteralPath (Join-Path $leaseState 'active-run.json'))) 'An expired pre-start lease left its active lock.'
     Complete-Test 'lease is a hard startup deadline'

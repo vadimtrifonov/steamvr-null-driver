@@ -62,7 +62,6 @@ function Invoke-DeadRunCleanup {
     $cleanup = Invoke-RunCleanup -RunDirectory $RunDirectory -StateRoot $StateRoot -Configuration $Configuration
     $state = [ordered]@{
         supervisor = $Supervisor
-        reason = 'stale-supervisor'
         error = $cleanup.error
         deadlineUtc = $Configuration.deadlineUtc
         environment = Get-OpenVrEnvironment `

@@ -6,9 +6,9 @@ function Invoke-SteamVrHeadlessCheck {
     )
 
     try {
-        $paths = Resolve-SteamVrPaths -SteamVrRoot $SteamVrRoot
+        $resolvedSteamVrRoot = Resolve-SteamVrRoot -SteamVrRoot $SteamVrRoot
         $steamProcesses = @(Get-SteamClientProcesses)
-        $runtimeProcesses = @(Get-SteamVrRuntimeProcesses -SteamVrRoot $paths.steamVrRoot)
+        $runtimeProcesses = @(Get-SteamVrRuntimeProcesses -SteamVrRoot $resolvedSteamVrRoot)
         $active = Get-ActiveRunRecord -StateRoot $StateRoot
         $inactiveRuns = @(Get-InactiveRunRecords -StateRoot $StateRoot -ActiveRun $active)
 
@@ -16,7 +16,7 @@ function Invoke-SteamVrHeadlessCheck {
             ok = $true
             action = 'check'
             canStart = $steamProcesses.Count -gt 0 -and $runtimeProcesses.Count -eq 0 -and $null -eq $active
-            paths = $paths
+            steamVrRoot = $resolvedSteamVrRoot
             steamProcesses = $steamProcesses
             activeRun = $active
             inactiveRuns = $inactiveRuns
@@ -63,38 +63,21 @@ function Start-SteamVrHeadlessRun {
         runId = $runId
         createdUtc = $createdUtc.ToString('o')
         deadlineUtc = $deadlineUtc.ToString('o')
-        steamVrRoot = $check.paths.steamVrRoot
+        steamVrRoot = $check.steamVrRoot
     }
     Write-JsonAtomic -Path (Join-Path $runDirectory 'run.json') -Value $configuration
 
     $lockAcquired = $false
     $spawned = $false
-    $prunedRuns = @()
     try {
         New-ActiveRunRecord -StateRoot $StateRoot -RunId $runId
         $lockAcquired = $true
-        $prunedRuns = @(Remove-InactiveRunDirectories `
+        Remove-InactiveRunDirectories `
             -StateRoot $StateRoot `
             -ActiveRunId $runId `
-            -ActiveRunDirectory $runDirectory)
-        if ($prunedRuns.Count -gt 0) {
-            Write-RunEvent -RunDirectory $runDirectory -Message "pruned-inactive - $($prunedRuns -join ', ')"
-        }
-        $supervisorPid = Start-DetachedSupervisor -SupervisorScriptPath $SupervisorScriptPath -RunId $runId -StateRoot $StateRoot
+            -ActiveRunDirectory $runDirectory
+        Start-DetachedSupervisor -SupervisorScriptPath $SupervisorScriptPath -RunId $runId -StateRoot $StateRoot
         $spawned = $true
-        $identityDeadline = [DateTime]::UtcNow.AddSeconds(5)
-        $supervisor = $null
-        do {
-            $supervisor = Get-ProcessRecordById -ProcessId $supervisorPid
-            if ($supervisor) { break }
-            Start-Sleep -Milliseconds 50
-        } while ([DateTime]::UtcNow -lt $identityDeadline)
-        if (-not $supervisor) {
-            throw 'The detached supervisor started, but its process identity could not be recorded.'
-        }
-        Write-JsonAtomic -Path (Join-Path $runDirectory 'launch.json') -Value ([ordered]@{
-            supervisor = $supervisor
-        })
     } catch {
         $startError = $_.Exception.Message
         $cleanupError = $null
@@ -102,6 +85,7 @@ function Start-SteamVrHeadlessRun {
             try {
                 $canRemoveRunDirectory = -not $lockAcquired
                 if ($lockAcquired) {
+                    [System.IO.File]::WriteAllText((Join-Path $runDirectory 'stop.request'), (Get-UtcText), [System.Text.UTF8Encoding]::new($false))
                     $cleanupConfiguration = Read-RunConfiguration -RunDirectory $runDirectory
                     $cleanup = Invoke-RunCleanup -RunDirectory $runDirectory -StateRoot $StateRoot -Configuration $cleanupConfiguration
                     $canRemoveRunDirectory = [bool]$cleanup.complete
@@ -120,7 +104,7 @@ function Start-SteamVrHeadlessRun {
         if ($cleanupError) {
             $startError = "$startError Pre-start cleanup also failed: $cleanupError"
         }
-        return [pscustomobject]@{ ok=$false; action='start'; runId=$runId; prunedRuns=$prunedRuns; error=$startError }
+        return [pscustomobject]@{ ok=$false; action='start'; runId=$runId; error=$startError }
     }
 
     $clientDeadline = $createdUtc.AddSeconds($script:StartupTimeoutSeconds + 20)
@@ -129,18 +113,26 @@ function Start-SteamVrHeadlessRun {
     }
     $statusPath = Join-Path $runDirectory 'status.json'
     do {
-        if (Test-Path -LiteralPath $statusPath) {
-            try {
-                $status = Read-JsonShared -Path $statusPath
-                if ($status.phase -eq 'ready') {
-                    return [pscustomobject]@{ ok=$true; action='start'; runId=$runId; prunedRuns=$prunedRuns; run=$status }
-                }
-                if (Test-RunPhaseTerminal -Phase ([string]$status.phase)) {
-                    $statusError = if ($status.error) { [string]$status.error } else { "The run ended in phase '$($status.phase)' before readiness." }
-                    return [pscustomobject]@{ ok=$false; action='start'; runId=$runId; prunedRuns=$prunedRuns; error=$statusError; run=$status }
-                }
-            } catch {}
-        }
+        try {
+            $status = if (Test-Path -LiteralPath $statusPath -PathType Leaf) {
+                Read-JsonShared -Path $statusPath
+            } else {
+                $null
+            }
+            $currentActive = Get-ActiveRunRecord -StateRoot $StateRoot
+            $ownsActiveLock = $null -ne $currentActive -and [string]$currentActive.runId -ceq $runId
+            if ($status -and [string]$status.phase -eq 'ready' -and $ownsActiveLock) {
+                return [pscustomobject]@{ ok=$true; action='start'; runId=$runId; run=$status }
+            }
+            if ($status -and (Test-RunPhaseTerminal -Phase ([string]$status.phase))) {
+                $statusError = if ($status.error) { [string]$status.error } else { "The run ended in phase '$($status.phase)' before readiness." }
+                return [pscustomobject]@{ ok=$false; action='start'; runId=$runId; error=$statusError; run=$status }
+            }
+            if (-not $ownsActiveLock) {
+                $statusError = if ($status -and $status.error) { [string]$status.error } else { 'The supervisor released the active lock before readiness.' }
+                return [pscustomobject]@{ ok=$false; action='start'; runId=$runId; error=$statusError; run=$status }
+            }
+        } catch {}
         Start-Sleep -Milliseconds 300
     } while ([DateTime]::UtcNow -lt $clientDeadline)
 
@@ -148,7 +140,6 @@ function Start-SteamVrHeadlessRun {
         ok = $false
         action = 'start'
         runId = $runId
-        prunedRuns = $prunedRuns
         error = 'The client timed out waiting for the detached supervisor. Use status or stop with this run ID.'
     }
 }
@@ -168,14 +159,24 @@ function Get-SteamVrHeadlessStatus {
         }
 
         $configuration = Read-RunConfiguration -RunDirectory $runDirectory
+        $runStatus = Read-JsonShared -Path $statusPath
+        $active = Get-ActiveRunRecord -StateRoot $StateRoot
+        $isActive = $null -ne $active -and [string]$active.runId -ceq $RunId
         $supervisor = Get-RunSupervisor -RunDirectory $runDirectory
+        $supervisorAlive = if ($isActive) { Get-SupervisorAlive -Supervisor $supervisor } else { $false }
+        $runtimeProcesses = if ($isActive) {
+            @(Get-SteamVrRuntimeProcesses -SteamVrRoot $configuration.steamVrRoot)
+        } else {
+            @()
+        }
         [pscustomobject]@{
             ok = $true
             action = 'status'
             runId = $RunId
-            supervisorAlive = Get-SupervisorAlive -Supervisor $supervisor
-            runtimeProcesses = @(Get-SteamVrRuntimeProcesses -SteamVrRoot $configuration.steamVrRoot)
-            run = Read-JsonShared -Path $statusPath
+            active = $isActive
+            supervisorAlive = $supervisorAlive
+            runtimeProcesses = $runtimeProcesses
+            run = $runStatus
         }
     } catch {
         [pscustomobject]@{ ok=$false; action='status'; runId=$RunId; error=$_.Exception.Message }
@@ -208,7 +209,7 @@ function Stop-SteamVrHeadlessRun {
                 ok = $true
                 action = 'stop'
                 runId = $RunId
-                result = 'removed inactive private journal'
+                result = 'removed retained private run state'
                 run = $priorStatus
                 error = $null
             }
@@ -216,14 +217,11 @@ function Stop-SteamVrHeadlessRun {
 
         $configuration = Read-RunConfiguration -RunDirectory $runDirectory
         $null = Assert-ActiveRunOwnership -StateRoot $StateRoot -RunId $RunId -RunDirectory $runDirectory
+        [System.IO.File]::WriteAllText((Join-Path $runDirectory 'stop.request'), (Get-UtcText), [System.Text.UTF8Encoding]::new($false))
         $supervisor = Get-RunSupervisor -RunDirectory $runDirectory
-        if (-not $supervisor -and (Test-SupervisorHandoffPending -RunDirectory $runDirectory -Configuration $configuration)) {
-            return [pscustomobject]@{ ok=$false; action='stop'; runId=$RunId; error='The detached-supervisor handoff is still pending. Retry stop after 15 seconds.' }
-        }
-
         $status = $null
+
         if (Get-SupervisorAlive -Supervisor $supervisor) {
-            [System.IO.File]::WriteAllText((Join-Path $runDirectory 'stop.request'), (Get-UtcText), [System.Text.UTF8Encoding]::new($false))
             $deadline = [DateTime]::UtcNow.AddSeconds($script:StopTimeoutSeconds)
             do {
                 $statusPath = Join-Path $runDirectory 'status.json'
@@ -236,10 +234,10 @@ function Stop-SteamVrHeadlessRun {
                 if ($status -and [string]$status.phase -eq 'cleanup-required') {
                     break
                 }
-                if ($status -and (Test-RunPhaseClean -Phase ([string]$status.phase)) -and -not $ownsActiveLock) {
+                if (-not $ownsActiveLock) {
                     break
                 }
-                if ($currentActive -and [string]$currentActive.runId -cne $RunId) {
+                if (-not (Get-SupervisorAlive -Supervisor $supervisor)) {
                     break
                 }
                 Start-Sleep -Milliseconds 300
@@ -247,14 +245,35 @@ function Stop-SteamVrHeadlessRun {
 
             $currentActive = Get-ActiveRunRecord -StateRoot $StateRoot
             $ownsActiveLock = $null -ne $currentActive -and [string]$currentActive.runId -ceq $RunId
-            if ($ownsActiveLock -and (-not $status -or [string]$status.phase -ne 'cleanup-required')) {
-                if (Get-SupervisorAlive -Supervisor $supervisor) {
+            if ($ownsActiveLock) {
+                $supervisorAlive = Get-SupervisorAlive -Supervisor $supervisor
+                if ($supervisorAlive -and (-not $status -or [string]$status.phase -ne 'cleanup-required')) {
                     return [pscustomobject]@{ ok=$false; action='stop'; runId=$RunId; error='The supervisor did not finish cleanup before the stop timeout.' }
                 }
-                $status = Invoke-DeadRunCleanup -RunDirectory $runDirectory -StateRoot $StateRoot -Configuration $configuration -Supervisor $supervisor
+                if (-not $supervisorAlive) {
+                    $status = Invoke-DeadRunCleanup -RunDirectory $runDirectory -StateRoot $StateRoot -Configuration $configuration -Supervisor $supervisor
+                }
             }
         } else {
             $status = Invoke-DeadRunCleanup -RunDirectory $runDirectory -StateRoot $StateRoot -Configuration $configuration -Supervisor $supervisor
+        }
+
+        $postCleanupActive = Get-ActiveRunRecord -StateRoot $StateRoot
+        if ($null -eq $postCleanupActive -and $supervisor) {
+            $statusDeadline = [DateTime]::UtcNow.AddSeconds(2)
+            do {
+                $statusPath = Join-Path $runDirectory 'status.json'
+                if (Test-Path -LiteralPath $statusPath -PathType Leaf) {
+                    try { $status = Read-JsonShared -Path $statusPath } catch {}
+                }
+                if ($status -and (Test-RunPhaseTerminal -Phase ([string]$status.phase))) {
+                    break
+                }
+                if (-not (Get-SupervisorAlive -Supervisor $supervisor)) {
+                    break
+                }
+                Start-Sleep -Milliseconds 50
+            } while ([DateTime]::UtcNow -lt $statusDeadline)
         }
 
         $currentActive = Get-ActiveRunRecord -StateRoot $StateRoot
@@ -263,18 +282,19 @@ function Stop-SteamVrHeadlessRun {
         }
 
         $ownsActiveLock = $null -ne $currentActive -and [string]$currentActive.runId -ceq $RunId
-        $cleanPhase = $status -and (Test-RunPhaseClean -Phase ([string]$status.phase))
-        $verifiedWithoutFinalStatus = $false
-        if (-not $ownsActiveLock -and -not $cleanPhase) {
-            $verifiedWithoutFinalStatus = @(Get-SteamVrRuntimeProcesses -SteamVrRoot $configuration.steamVrRoot).Count -eq 0
+        $runtimeStopped = $false
+        if (-not $ownsActiveLock) {
+            $runtimeStopped = @(Get-SteamVrRuntimeProcesses -SteamVrRoot $configuration.steamVrRoot).Count -eq 0
         }
-        $ok = -not $ownsActiveLock -and ($cleanPhase -or $verifiedWithoutFinalStatus)
+        $ok = -not $ownsActiveLock -and $runtimeStopped
         $error = if ($ok) {
             $null
         } elseif ($status -and $status.error) {
             [string]$status.error
+        } elseif ($ownsActiveLock) {
+            'Cleanup retained the active lock.'
         } else {
-            'Cleanup did not reach a clean terminal state.'
+            'SteamVR processes remain under the selected runtime root.'
         }
         $result = [pscustomobject]@{ ok=$ok; action='stop'; runId=$RunId; run=$status; error=$error }
         if ($ok) {

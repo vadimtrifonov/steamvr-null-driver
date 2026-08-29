@@ -30,7 +30,6 @@ function Assert-SteamVrCleanupLayout {
 
     $root = ConvertTo-FullPath $SteamVrRoot
     $requiredPaths = @(
-        'bin\win64\vrstartup.exe',
         'bin\win64\vrserver.exe',
         'bin\win64\vrcompositor.exe',
         'bin\win64\vrmonitor.exe'
@@ -48,9 +47,15 @@ function Assert-SteamVrRuntimeLayout {
 
     Assert-SteamVrCleanupLayout -SteamVrRoot $SteamVrRoot
     $root = ConvertTo-FullPath $SteamVrRoot
-    $nullDriverPath = 'drivers\null\bin\win64\driver_null.dll'
-    if (-not (Test-Path -LiteralPath (Join-Path $root $nullDriverPath) -PathType Leaf)) {
-        throw "The selected SteamVR root has no bundled null driver at '$nullDriverPath'."
+    $requiredPaths = @(
+        'bin\win64\vrstartup.exe',
+        'drivers\null\bin\win64\driver_null.dll'
+    )
+    $missing = @($requiredPaths | Where-Object {
+        -not (Test-Path -LiteralPath (Join-Path $root $_) -PathType Leaf)
+    })
+    if ($missing.Count -gt 0) {
+        throw "The selected SteamVR root cannot start a null-HMD session. Missing: $($missing -join ', ')."
     }
 }
 
@@ -65,7 +70,7 @@ function Test-SteamVrRuntimeLayout {
     }
 }
 
-function Resolve-SteamVrPaths {
+function Resolve-SteamVrRoot {
     param([string]$SteamVrRoot)
 
     if ($SteamVrRoot) {
@@ -84,10 +89,7 @@ function Resolve-SteamVrPaths {
     }
 
     Assert-SteamVrRuntimeLayout -SteamVrRoot $runtimeRoot
-    [pscustomobject]@{
-        steamVrRoot = ConvertTo-FullPath $runtimeRoot
-        vrStartupPath = ConvertTo-FullPath (Join-Path $runtimeRoot 'bin\win64\vrstartup.exe')
-    }
+    ConvertTo-FullPath $runtimeRoot
 }
 
 function ConvertTo-ProcessRecord {

@@ -96,11 +96,6 @@ function Write-JsonAtomic {
         [Parameter(Mandatory)]$Value
     )
 
-    $parent = Split-Path -Parent $Path
-    if (-not (Test-Path -LiteralPath $parent)) {
-        New-Item -ItemType Directory -Path $parent -Force | Out-Null
-    }
-
     $temporaryPath = "$Path.$PID.tmp"
     try {
         $json = $Value | ConvertTo-Json -Depth 20

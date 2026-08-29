@@ -27,33 +27,25 @@ function Start-DetachedSupervisor {
     if ($result.ReturnValue -ne 0) {
         throw "Win32_Process.Create failed with return value $($result.ReturnValue)."
     }
-    [int]$result.ProcessId
 }
 
 function Get-RunSupervisor {
     param([Parameter(Mandatory)][string]$RunDirectory)
 
-    $launchPath = Join-Path $RunDirectory 'launch.json'
-    if (-not (Test-Path -LiteralPath $launchPath -PathType Leaf)) {
+    $statusPath = Join-Path $RunDirectory 'status.json'
+    if (-not (Test-Path -LiteralPath $statusPath -PathType Leaf)) {
         return $null
     }
-    $launch = Read-JsonShared -Path $launchPath
-    if (-not $launch.supervisor.pid -or -not $launch.supervisor.path -or -not $launch.supervisor.creationUtc) {
-        throw 'The supervisor launch record is incomplete.'
+    $status = Read-JsonShared -Path $statusPath
+    $property = $status.PSObject.Properties['supervisor']
+    if ($null -eq $property -or $null -eq $property.Value) {
+        return $null
     }
-    $launch.supervisor
-}
-
-function Test-SupervisorHandoffPending {
-    param(
-        [Parameter(Mandatory)][string]$RunDirectory,
-        [Parameter(Mandatory)]$Configuration
-    )
-
-    if (Get-RunSupervisor -RunDirectory $RunDirectory) {
-        return $false
+    $supervisor = $property.Value
+    if (-not $supervisor.pid -or -not $supervisor.path -or -not $supervisor.creationUtc) {
+        throw 'The supervisor record in the run status is incomplete.'
     }
-    [DateTime]::UtcNow -lt (ConvertTo-UtcDateTime $Configuration.createdUtc).AddSeconds(15)
+    $supervisor
 }
 
 function Get-SupervisorAlive {
@@ -73,13 +65,11 @@ function Assert-RunContinues {
 
     if (Test-Path -LiteralPath (Join-Path $RunDirectory 'stop.request')) {
         $exception = [InvalidOperationException]::new('The run was stopped by request.')
-        $exception.Data['RunReason'] = 'requested'
         $exception.Data['RunOutcome'] = 'stopped'
         throw $exception
     }
     if ([DateTime]::UtcNow -ge $LeaseDeadline) {
         $exception = [TimeoutException]::new('The run lease expired.')
-        $exception.Data['RunReason'] = 'lease-expired'
         $exception.Data['RunOutcome'] = 'expired'
         throw $exception
     }
@@ -94,25 +84,9 @@ function Invoke-SteamVrHeadlessSupervisor {
 
     $runDirectory = Get-RunDirectory -StateRoot $StateRoot -RunId $RunId
     $configuration = Read-RunConfiguration -RunDirectory $runDirectory
-    $launchPath = Join-Path $runDirectory 'launch.json'
-    $handoffDeadline = (ConvertTo-UtcDateTime $configuration.createdUtc).AddSeconds(15)
-    while (-not (Test-Path -LiteralPath $launchPath -PathType Leaf) -and [DateTime]::UtcNow -lt $handoffDeadline) {
-        Start-Sleep -Milliseconds 50
-    }
-    if (-not (Test-Path -LiteralPath $launchPath -PathType Leaf)) {
-        throw 'The parent did not complete the detached-supervisor handoff.'
-    }
-
-    $launch = Read-JsonShared -Path $launchPath
     $supervisor = Get-CurrentProcessRecord
-    if (-not (Test-ProcessRecordsMatch -First $supervisor -Second $launch.supervisor)) {
-        throw 'The detached-supervisor identity does not match the launch record.'
-    }
-    $null = Assert-ActiveRunOwnership -StateRoot $StateRoot -RunId $RunId -RunDirectory $runDirectory
-
     $state = [ordered]@{
         supervisor = $supervisor
-        reason = $null
         error = $null
         deadlineUtc = $configuration.deadlineUtc
         environment = Get-OpenVrEnvironment `
@@ -128,15 +102,19 @@ function Invoke-SteamVrHeadlessSupervisor {
     $compositorRecord = $null
     $outcome = 'failed'
 
+    Write-RunStatus -RunDirectory $runDirectory -RunId $RunId -Phase 'starting' -Message 'Preparing and starting SteamVR.' -State $state | Out-Null
+    if (Test-Path -LiteralPath (Join-Path $runDirectory 'stop.request')) {
+        return
+    }
+    $null = Assert-ActiveRunOwnership -StateRoot $StateRoot -RunId $RunId -RunDirectory $runDirectory
+
     try {
-        Write-RunStatus -RunDirectory $runDirectory -RunId $RunId -Phase 'preflight' -Message 'Checking exclusive SteamVR ownership.' -State $state | Out-Null
         Assert-RunContinues -RunDirectory $runDirectory -LeaseDeadline $leaseDeadline
         Assert-SteamVrRuntimeLayout -SteamVrRoot $configuration.steamVrRoot
         if (@(Get-SteamVrRuntimeProcesses -SteamVrRoot $configuration.steamVrRoot).Count -gt 0) {
             throw 'A SteamVR process started after the run reserved the runtime.'
         }
 
-        Write-RunStatus -RunDirectory $runDirectory -RunId $RunId -Phase 'configuring' -Message 'Creating an isolated null-driver configuration.' -State $state | Out-Null
         Initialize-PrivateHeadlessConfiguration `
             -PrivateConfigRoot $configuration.privateConfigRoot `
             -PrivateLogRoot $configuration.privateLogRoot
@@ -145,7 +123,6 @@ function Invoke-SteamVrHeadlessSupervisor {
             throw 'A SteamVR process started while the private configuration was prepared.'
         }
 
-        Write-RunStatus -RunDirectory $runDirectory -RunId $RunId -Phase 'starting' -Message 'Starting SteamVR.' -State $state | Out-Null
         [void](Start-VrStartupProcess `
             -Path $configuration.vrStartupPath `
             -SteamVrRoot $configuration.steamVrRoot `
@@ -230,12 +207,10 @@ function Invoke-SteamVrHeadlessSupervisor {
     } catch {
         $controlOutcome = $_.Exception.Data['RunOutcome']
         if ($controlOutcome) {
-            $state.reason = [string]$_.Exception.Data['RunReason']
             $state.error = $null
             $outcome = [string]$controlOutcome
         } else {
             $state.error = $_.Exception.Message
-            $state.reason = 'failure'
             $outcome = 'failed'
         }
     } finally {

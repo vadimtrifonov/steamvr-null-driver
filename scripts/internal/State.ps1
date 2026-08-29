@@ -1,29 +1,9 @@
 $script:TerminalRunPhases = @('stopped', 'expired', 'failed', 'cleanup-required')
-$script:CleanTerminalRunPhases = @('stopped', 'expired', 'failed')
 
 function Test-RunPhaseTerminal {
     param([AllowEmptyString()][string]$Phase)
 
     $script:TerminalRunPhases -contains $Phase
-}
-
-function Test-RunPhaseClean {
-    param([AllowEmptyString()][string]$Phase)
-
-    $script:CleanTerminalRunPhases -contains $Phase
-}
-
-function Write-RunEvent {
-    param(
-        [Parameter(Mandatory)][string]$RunDirectory,
-        [Parameter(Mandatory)][string]$Message
-    )
-
-    try {
-        $path = Join-Path $RunDirectory 'events.log'
-        $line = "[$(Get-UtcText)] $Message$([Environment]::NewLine)"
-        [System.IO.File]::AppendAllText($path, $line, [System.Text.UTF8Encoding]::new($false))
-    } catch {}
 }
 
 function New-RunStatus {
@@ -40,7 +20,6 @@ function New-RunStatus {
         message = $Message
         updatedUtc = Get-UtcText
         supervisor = $State.supervisor
-        reason = $State.reason
         error = $State.error
         deadlineUtc = $State.deadlineUtc
         environment = $State.environment
@@ -60,7 +39,6 @@ function Write-RunStatus {
 
     $status = New-RunStatus -RunId $RunId -Phase $Phase -Message $Message -State $State
     Write-JsonAtomic -Path (Join-Path $RunDirectory 'status.json') -Value $status
-    Write-RunEvent -RunDirectory $RunDirectory -Message "$Phase - $Message"
     [pscustomobject]$status
 }
 
@@ -76,7 +54,6 @@ function Write-RunStatusBestEffort {
     try {
         Write-RunStatus -RunDirectory $RunDirectory -RunId $RunId -Phase $Phase -Message $Message -State $State
     } catch {
-        Write-RunEvent -RunDirectory $RunDirectory -Message "status-write-failed - $($_.Exception.Message)"
         $null
     }
 }
@@ -265,13 +242,10 @@ function Remove-InactiveRunDirectories {
         return @()
     }
 
-    @(
-        foreach ($directory in @(Get-ChildItem -LiteralPath $runsRoot -Directory -Force)) {
-            if ($directory.Name -ceq $ActiveRunId) {
-                continue
-            }
-            Remove-Item -LiteralPath $directory.FullName -Recurse -Force -ErrorAction Stop
-            $directory.Name
+    foreach ($directory in @(Get-ChildItem -LiteralPath $runsRoot -Directory -Force)) {
+        if ($directory.Name -ceq $ActiveRunId) {
+            continue
         }
-    )
+        Remove-Item -LiteralPath $directory.FullName -Recurse -Force -ErrorAction Stop
+    }
 }

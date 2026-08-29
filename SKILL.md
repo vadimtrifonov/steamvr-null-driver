@@ -41,7 +41,9 @@ The duration includes startup. The permitted range is 1 through 120 minutes.
 
 Continue when `ok=true` and `run.phase=ready`. Save `runId` and `run.environment`.
 
-If `start` fails, run `status`. Then run `stop` with the returned run ID.
+If `start` returns a run ID without readiness, run `status`. Then run `stop` with that run ID.
+
+If `start` returns no run ID, correct the preflight error before you try again.
 
 ### 3. Start a child application
 
@@ -58,7 +60,7 @@ pwsh -NoProfile -File scripts/steamvr-headless.ps1 status `
   -RunId "<run-id>"
 ```
 
-A usable active run has `supervisorAlive=true` and `run.phase=ready`.
+A usable active run has `active=true`, `supervisorAlive=true`, and `run.phase=ready`.
 
 ### 5. Stop the run
 
@@ -122,15 +124,15 @@ An unreadable path for a known SteamVR process stops inspection. Inaccessible un
 
 The detached supervisor enforces the deadline while it operates. If the supervisor stops, use `stop` to clean the stale run.
 
-A malformed active journal or an orphan lock requires manual inspection.
+Malformed active state or an orphan lock requires manual inspection.
 
 ## Retained runs
 
-`check` reports completed journals in `inactiveRuns`. These journals do not own the runtime.
+`check` reports retained run state in `inactiveRuns`. These runs do not own the runtime.
 
-A new lock owner removes retained journals before startup. `start.prunedRuns` reports their run IDs.
+A new lock owner removes retained run state before startup.
 
-Use `status -RunId` to inspect a retained journal. Use `stop -RunId` to remove it before the next start.
+Use `status -RunId` to inspect a retained run. Use `stop -RunId` to remove it before the next start.
 
 ## Output
 
