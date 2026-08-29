@@ -368,6 +368,31 @@ Active HMD set to tomorrow_headset.Serial 1
     Assert-Equal (@(Get-ChildItem -LiteralPath (Join-Path $loserState 'runs') -Directory -ErrorAction SilentlyContinue).Count) 0 'A start that lost the active lock retained its run directory.'
     Complete-Test 'competing start loser is non-destructive'
 
+    $pollingState = Join-Path $testRoot 'polling-active-state'
+    $pollingResult = & $module {
+        param($SteamVrRoot, $StateRoot, $SupervisorScript)
+        $originalStartDetachedSupervisor = (Get-Command Start-DetachedSupervisor -CommandType Function).ScriptBlock
+        Set-Item -Path Function:Start-DetachedSupervisor -Value {
+            param($SupervisorScriptPath, $RunId, $StateRoot)
+            [System.IO.File]::WriteAllText((Join-Path $StateRoot 'active-run.json'), '{')
+        }
+        $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+        try {
+            $start = Start-SteamVrHeadlessRun `
+                -SteamVrRoot $SteamVrRoot `
+                -StateRoot $StateRoot `
+                -SupervisorScriptPath $SupervisorScript
+            [pscustomobject]@{ start=$start;elapsedSeconds=$stopwatch.Elapsed.TotalSeconds }
+        } finally {
+            Set-Item -Path Function:Start-DetachedSupervisor -Value $originalStartDetachedSupervisor
+        }
+    } $fakeRuntime $pollingState $supervisorScript
+    Assert-True (-not $pollingResult.start.ok) 'Start polling suppressed an unreadable active lock.'
+    Assert-True ([bool][string]$pollingResult.start.runId) 'The active-lock failure did not preserve its run ID.'
+    Assert-True ($pollingResult.elapsedSeconds -lt 5) 'An unreadable active lock became a startup timeout.'
+    Remove-Item -LiteralPath $pollingState -Recurse -Force
+    Complete-Test 'start polling fails immediately on unreadable active state'
+
     $inspectionRecord = & $module { Get-CurrentProcessRecord }
     $inspectionResult = & $module {
         param($SteamVrRoot, $StateRoot, $Record)
@@ -500,6 +525,26 @@ Active HMD set to tomorrow_headset.Serial 1
     Remove-Item -LiteralPath $activeStatusState -Recurse -Force
     Complete-Test 'status separates active observation from retained state'
 
+    $retainedStatusState = Join-Path $testRoot 'retained-status-state'
+    $retainedStatusRunId = [Guid]::NewGuid().ToString('N')
+    $retainedStatusRun = Join-Path (Join-Path $retainedStatusState 'runs') $retainedStatusRunId
+    New-Item -ItemType Directory -Path $retainedStatusRun -Force | Out-Null
+    $null = Write-FixtureRunConfiguration `
+        -RunDirectory $retainedStatusRun `
+        -Configuration (New-FixtureRunConfiguration -RunId $retainedStatusRunId -SteamVrRoot $fakeRuntime)
+    [pscustomobject]@{
+        runId = $retainedStatusRunId
+        phase = 'failed'
+        supervisor = [pscustomobject]@{ pid=1 }
+    } | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $retainedStatusRun 'status.json') -Encoding utf8NoBOM
+    $retainedStatus = Get-SteamVrHeadlessStatus -RunId $retainedStatusRunId -StateRoot $retainedStatusState
+    Assert-True $retainedStatus.ok 'Status parsed an irrelevant retained supervisor record.'
+    Assert-True (-not $retainedStatus.active) 'Status reported retained state as active.'
+    Assert-True (-not $retainedStatus.supervisorAlive) 'Status reported a retained supervisor as alive.'
+    Assert-Equal $retainedStatus.runtimeProcesses.Count 0 'Status attributed runtime processes to retained state.'
+    Remove-Item -LiteralPath $retainedStatusState -Recurse -Force
+    Complete-Test 'retained status ignores irrelevant supervisor identity'
+
     $contradictoryState = Join-Path $testRoot 'contradictory-terminal-state'
     $contradictoryRunId = [Guid]::NewGuid().ToString('N')
     $contradictoryRun = Join-Path (Join-Path $contradictoryState 'runs') $contradictoryRunId
@@ -620,6 +665,21 @@ Active HMD set to tomorrow_headset.Serial 1
     Assert-True $unregisteredResult.ok 'Stop did not clean a run before supervisor registration.'
     Assert-True (-not (Test-Path -LiteralPath $unregisteredState)) 'Pre-registration stop left state artifacts.'
     Complete-Test 'stop cleans an unregistered supervisor immediately'
+
+    $delayedSupervisorFailed = $false
+    try {
+        Invoke-SteamVrHeadlessSupervisor -RunId $unregisteredRunId -StateRoot $unregisteredState
+    } catch {
+        $delayedSupervisorFailed = $true
+    }
+    $delayedRuntimeProcesses = @(& $module {
+        param($SteamVrRoot)
+        Get-SteamVrRuntimeProcesses -SteamVrRoot $SteamVrRoot
+    } $fakeRuntime)
+    Assert-True $delayedSupervisorFailed 'A delayed supervisor continued after stop removed its run state.'
+    Assert-True (-not (Test-Path -LiteralPath $unregisteredState)) 'A delayed supervisor recreated the removed state root.'
+    Assert-Equal $delayedRuntimeProcesses.Count 0 'A delayed supervisor restarted the SteamVR runtime.'
+    Complete-Test 'delayed supervisor cannot revive a stopped run'
 
     $currentSupervisor = & $module { Get-CurrentProcessRecord }
     $reusedIdentity = [pscustomobject]@{

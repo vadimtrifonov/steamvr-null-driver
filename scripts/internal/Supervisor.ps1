@@ -29,15 +29,13 @@ function Start-DetachedSupervisor {
     }
 }
 
-function Get-RunSupervisor {
-    param([Parameter(Mandatory)][string]$RunDirectory)
+function Get-StatusSupervisor {
+    param([AllowNull()]$RunStatus)
 
-    $statusPath = Join-Path $RunDirectory 'status.json'
-    if (-not (Test-Path -LiteralPath $statusPath -PathType Leaf)) {
+    if ($null -eq $RunStatus) {
         return $null
     }
-    $status = Read-JsonShared -Path $statusPath
-    $property = $status.PSObject.Properties['supervisor']
+    $property = $RunStatus.PSObject.Properties['supervisor']
     if ($null -eq $property -or $null -eq $property.Value) {
         return $null
     }

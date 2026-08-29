@@ -113,26 +113,34 @@ function Start-SteamVrHeadlessRun {
     }
     $statusPath = Join-Path $runDirectory 'status.json'
     do {
+        $status = $null
+        if (Test-Path -LiteralPath $statusPath -PathType Leaf) {
+            try {
+                $status = Read-JsonShared -Path $statusPath
+            } catch [System.IO.IOException] {
+                $status = $null
+            } catch {
+                return [pscustomobject]@{ ok=$false; action='start'; runId=$runId; error=$_.Exception.Message }
+            }
+        }
+
         try {
-            $status = if (Test-Path -LiteralPath $statusPath -PathType Leaf) {
-                Read-JsonShared -Path $statusPath
-            } else {
-                $null
-            }
             $currentActive = Get-ActiveRunRecord -StateRoot $StateRoot
-            $ownsActiveLock = $null -ne $currentActive -and [string]$currentActive.runId -ceq $runId
-            if ($status -and [string]$status.phase -eq 'ready' -and $ownsActiveLock) {
-                return [pscustomobject]@{ ok=$true; action='start'; runId=$runId; run=$status }
-            }
-            if ($status -and (Test-RunPhaseTerminal -Phase ([string]$status.phase))) {
-                $statusError = if ($status.error) { [string]$status.error } else { "The run ended in phase '$($status.phase)' before readiness." }
-                return [pscustomobject]@{ ok=$false; action='start'; runId=$runId; error=$statusError; run=$status }
-            }
-            if (-not $ownsActiveLock) {
-                $statusError = if ($status -and $status.error) { [string]$status.error } else { 'The supervisor released the active lock before readiness.' }
-                return [pscustomobject]@{ ok=$false; action='start'; runId=$runId; error=$statusError; run=$status }
-            }
-        } catch {}
+        } catch {
+            return [pscustomobject]@{ ok=$false; action='start'; runId=$runId; error=$_.Exception.Message }
+        }
+        $ownsActiveLock = $null -ne $currentActive -and [string]$currentActive.runId -ceq $runId
+        if ($status -and [string]$status.phase -eq 'ready' -and $ownsActiveLock) {
+            return [pscustomobject]@{ ok=$true; action='start'; runId=$runId; run=$status }
+        }
+        if ($status -and (Test-RunPhaseTerminal -Phase ([string]$status.phase))) {
+            $statusError = if ($status.error) { [string]$status.error } else { "The run ended in phase '$($status.phase)' before readiness." }
+            return [pscustomobject]@{ ok=$false; action='start'; runId=$runId; error=$statusError; run=$status }
+        }
+        if (-not $ownsActiveLock) {
+            $statusError = if ($status -and $status.error) { [string]$status.error } else { 'The supervisor released the active lock before readiness.' }
+            return [pscustomobject]@{ ok=$false; action='start'; runId=$runId; error=$statusError; run=$status }
+        }
         Start-Sleep -Milliseconds 300
     } while ([DateTime]::UtcNow -lt $clientDeadline)
 
@@ -162,7 +170,7 @@ function Get-SteamVrHeadlessStatus {
         $runStatus = Read-JsonShared -Path $statusPath
         $active = Get-ActiveRunRecord -StateRoot $StateRoot
         $isActive = $null -ne $active -and [string]$active.runId -ceq $RunId
-        $supervisor = Get-RunSupervisor -RunDirectory $runDirectory
+        $supervisor = if ($isActive) { Get-StatusSupervisor -RunStatus $runStatus } else { $null }
         $supervisorAlive = if ($isActive) { Get-SupervisorAlive -Supervisor $supervisor } else { $false }
         $runtimeProcesses = if ($isActive) {
             @(Get-SteamVrRuntimeProcesses -SteamVrRoot $configuration.steamVrRoot)
@@ -218,8 +226,13 @@ function Stop-SteamVrHeadlessRun {
         $configuration = Read-RunConfiguration -RunDirectory $runDirectory
         $null = Assert-ActiveRunOwnership -StateRoot $StateRoot -RunId $RunId -RunDirectory $runDirectory
         [System.IO.File]::WriteAllText((Join-Path $runDirectory 'stop.request'), (Get-UtcText), [System.Text.UTF8Encoding]::new($false))
-        $supervisor = Get-RunSupervisor -RunDirectory $runDirectory
-        $status = $null
+        $statusPath = Join-Path $runDirectory 'status.json'
+        $status = if (Test-Path -LiteralPath $statusPath -PathType Leaf) {
+            Read-JsonShared -Path $statusPath
+        } else {
+            $null
+        }
+        $supervisor = Get-StatusSupervisor -RunStatus $status
 
         if (Get-SupervisorAlive -Supervisor $supervisor) {
             $deadline = [DateTime]::UtcNow.AddSeconds($script:StopTimeoutSeconds)
