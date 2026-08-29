@@ -1,20 +1,14 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory, Position = 0)]
-    [ValidateSet('check', 'start', 'status', 'stop', 'recover', 'supervise')]
+    [ValidateSet('check', 'start', 'status', 'stop')]
     [string]$Action,
 
-    [string]$SteamRoot,
     [string]$SteamVrRoot,
     [string]$RunId,
 
-    [ValidateRange(1, 1440)]
-    [int]$MaxDurationMinutes = 30,
-
-    [ValidateRange(15, 300)]
-    [int]$StartupTimeoutSeconds = 90,
-
-    [string]$StateRoot = (Join-Path $env:LOCALAPPDATA 'SteamVrHeadless')
+    [ValidateRange(1, 120)]
+    [int]$MaxDurationMinutes = 30
 )
 
 $ErrorActionPreference = 'Stop'
@@ -22,37 +16,23 @@ $modulePath = Join-Path $PSScriptRoot 'SteamVrHeadless.psm1'
 Import-Module -Name $modulePath -Force
 
 try {
+    $stateRoot = [System.IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA 'SteamVrHeadless'))
     $result = switch ($Action) {
         'check' {
-            Invoke-SteamVrHeadlessCheck `
-                -SteamRoot $SteamRoot `
-                -SteamVrRoot $SteamVrRoot `
-                -StateRoot $StateRoot
+            Invoke-SteamVrHeadlessCheck -SteamVrRoot $SteamVrRoot -StateRoot $stateRoot
         }
         'start' {
             Start-SteamVrHeadlessRun `
-                -SteamRoot $SteamRoot `
                 -SteamVrRoot $SteamVrRoot `
-                -StateRoot $StateRoot `
-                -EntryScriptPath $PSCommandPath `
-                -MaxDurationMinutes $MaxDurationMinutes `
-                -StartupTimeoutSeconds $StartupTimeoutSeconds
+                -StateRoot $stateRoot `
+                -SupervisorScriptPath (Join-Path $PSScriptRoot 'internal\SupervisorHost.ps1') `
+                -MaxDurationMinutes $MaxDurationMinutes
         }
         'status' {
-            Get-SteamVrHeadlessStatus -RunId $RunId -StateRoot $StateRoot
+            Get-SteamVrHeadlessStatus -RunId $RunId -StateRoot $stateRoot
         }
         'stop' {
-            Stop-SteamVrHeadlessRun -RunId $RunId -StateRoot $StateRoot
-        }
-        'recover' {
-            Invoke-SteamVrHeadlessRecovery -StateRoot $StateRoot
-        }
-        'supervise' {
-            if (-not $RunId) {
-                throw 'The internal supervise action requires -RunId.'
-            }
-            Invoke-SteamVrHeadlessSupervisor -RunId $RunId -StateRoot $StateRoot
-            exit 0
+            Stop-SteamVrHeadlessRun -RunId $RunId -StateRoot $stateRoot
         }
     }
 

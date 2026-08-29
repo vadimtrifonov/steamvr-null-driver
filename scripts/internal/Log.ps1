@@ -47,11 +47,12 @@ function Get-VrLogAssessment {
     $unexpectedDrivers = @($observedDrivers | Where-Object { $_ -ne 'null' })
     $unexpectedHmdDrivers = @($activeHmdDrivers | Where-Object { $_ -ne 'null' } | Sort-Object -Unique)
     $roomSetupDetected = $Text -match '(?i)(openvr\.tool\.steamvr_room_setup|steamvr_room_setup\.exe)'
+    $directModeDetected = $Text -match '(?i)(\[Display\]\s+Enabling direct mode|Successfully set display visibility)'
     $nullLoaded = $loadedDrivers -contains 'null'
     $nullActive = $activeHmdDrivers.Count -gt 0 -and $activeHmdDrivers[-1] -eq 'null'
 
     [pscustomobject]@{
-        ready = $nullLoaded -and $nullActive -and $unexpectedDrivers.Count -eq 0 -and $unexpectedHmdDrivers.Count -eq 0 -and -not $roomSetupDetected
+        ready = $nullLoaded -and $nullActive -and $unexpectedDrivers.Count -eq 0 -and $unexpectedHmdDrivers.Count -eq 0 -and -not $roomSetupDetected -and -not $directModeDetected
         nullDriverLoaded = $nullLoaded
         activeHmdDrivers = $activeHmdDrivers
         loadedDrivers = $loadedDrivers
@@ -59,6 +60,7 @@ function Get-VrLogAssessment {
         unexpectedDrivers = $unexpectedDrivers
         unexpectedHmdDrivers = $unexpectedHmdDrivers
         roomSetupDetected = $roomSetupDetected
-        modeViolation = $unexpectedDrivers.Count -gt 0 -or $unexpectedHmdDrivers.Count -gt 0
+        directModeDetected = $directModeDetected
+        modeViolation = $unexpectedDrivers.Count -gt 0 -or $unexpectedHmdDrivers.Count -gt 0 -or $directModeDetected
     }
 }

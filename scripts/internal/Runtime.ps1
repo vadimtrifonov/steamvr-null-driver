@@ -8,30 +8,6 @@ $script:CanonicalSteamVrProcessNames = @(
     'vrstartup'
 )
 
-function Get-RegisteredSteamRoots {
-    $roots = [System.Collections.Generic.List[string]]::new()
-    foreach ($registryPath in @(
-        'HKCU:\SOFTWARE\Valve\Steam',
-        'HKLM:\SOFTWARE\WOW6432Node\Valve\Steam',
-        'HKLM:\SOFTWARE\Valve\Steam'
-    )) {
-        try {
-            $properties = Get-ItemProperty -LiteralPath $registryPath -ErrorAction Stop
-            foreach ($propertyName in @('SteamPath', 'InstallPath')) {
-                $property = $properties.PSObject.Properties[$propertyName]
-                if ($property -and $property.Value) {
-                    $roots.Add((ConvertTo-FullPath ([string]$property.Value)))
-                }
-            }
-            $steamExe = $properties.PSObject.Properties['SteamExe']
-            if ($steamExe -and $steamExe.Value) {
-                $roots.Add((ConvertTo-FullPath (Split-Path -Parent ([string]$steamExe.Value))))
-            }
-        } catch {}
-    }
-    @($roots | Sort-Object -Unique)
-}
-
 function Get-RegisteredSteamVrRoots {
     $roots = [System.Collections.Generic.List[string]]::new()
     foreach ($registryPath in @(
@@ -49,54 +25,58 @@ function Get-RegisteredSteamVrRoots {
     @($roots | Sort-Object -Unique)
 }
 
-function Resolve-SteamVrPaths {
-    param(
-        [string]$SteamRoot,
-        [string]$SteamVrRoot
+function Assert-SteamVrRuntimeLayout {
+    param([Parameter(Mandatory)][string]$SteamVrRoot)
+
+    $root = ConvertTo-FullPath $SteamVrRoot
+    $requiredPaths = @(
+        'bin\win64\vrstartup.exe',
+        'bin\win64\vrserver.exe',
+        'bin\win64\vrcompositor.exe',
+        'bin\win64\vrmonitor.exe',
+        'drivers\null\bin\win64\driver_null.dll'
     )
+    $missing = @($requiredPaths | Where-Object {
+        -not (Test-Path -LiteralPath (Join-Path $root $_) -PathType Leaf)
+    })
+    if ($missing.Count -gt 0) {
+        throw "The selected SteamVR root is incomplete. Missing: $($missing -join ', ')."
+    }
+}
+
+function Test-SteamVrRuntimeLayout {
+    param([Parameter(Mandatory)][string]$SteamVrRoot)
+
+    try {
+        Assert-SteamVrRuntimeLayout -SteamVrRoot $SteamVrRoot
+        $true
+    } catch {
+        $false
+    }
+}
+
+function Resolve-SteamVrPaths {
+    param([string]$SteamVrRoot)
 
     if ($SteamVrRoot) {
         $runtimeRoot = ConvertTo-FullPath $SteamVrRoot
     } else {
         $registeredRoots = @(Get-RegisteredSteamVrRoots | Where-Object {
-            Test-Path -LiteralPath (Join-Path $_ 'bin\win64\vrstartup.exe') -PathType Leaf
+            Test-SteamVrRuntimeLayout -SteamVrRoot $_
         })
+        if ($registeredRoots.Count -eq 0) {
+            throw 'SteamVR was not found in its app registration. Supply -SteamVrRoot.'
+        }
         if ($registeredRoots.Count -gt 1) {
             throw "More than one registered SteamVR installation was found: $($registeredRoots -join ', '). Supply -SteamVrRoot."
         }
-
-        if ($registeredRoots.Count -eq 1) {
-            $runtimeRoot = $registeredRoots[0]
-        } else {
-            $steamRoots = @(if ($SteamRoot) {
-                ConvertTo-FullPath $SteamRoot
-            } else {
-                Get-RegisteredSteamRoots
-            })
-            $runtimeRoots = @($steamRoots | ForEach-Object {
-                $candidate = ConvertTo-FullPath (Join-Path $_ 'steamapps\common\SteamVR')
-                if (Test-Path -LiteralPath (Join-Path $candidate 'bin\win64\vrstartup.exe') -PathType Leaf) {
-                    $candidate
-                }
-            } | Sort-Object -Unique)
-            if ($runtimeRoots.Count -eq 0) {
-                throw 'SteamVR was not found in its app registration or under a registered Steam root. Supply -SteamVrRoot.'
-            }
-            if ($runtimeRoots.Count -gt 1) {
-                throw "More than one SteamVR installation was found under Steam roots: $($runtimeRoots -join ', '). Supply -SteamVrRoot."
-            }
-            $runtimeRoot = $runtimeRoots[0]
-        }
+        $runtimeRoot = $registeredRoots[0]
     }
 
-    $startupPath = ConvertTo-FullPath (Join-Path $runtimeRoot 'bin\win64\vrstartup.exe')
-    if (-not (Test-Path -LiteralPath $startupPath -PathType Leaf)) {
-        throw 'The selected SteamVR root has no bin\win64\vrstartup.exe.'
-    }
-
+    Assert-SteamVrRuntimeLayout -SteamVrRoot $runtimeRoot
     [pscustomobject]@{
         steamVrRoot = ConvertTo-FullPath $runtimeRoot
-        vrStartupPath = $startupPath
+        vrStartupPath = ConvertTo-FullPath (Join-Path $runtimeRoot 'bin\win64\vrstartup.exe')
     }
 }
 
@@ -235,6 +215,7 @@ function Stop-SteamVrRuntime {
         try {
             $info = New-OpenVrProcessInfo `
                 -Path $monitor[0].path `
+                -SteamVrRoot $SteamVrRoot `
                 -PrivateConfigRoot $PrivateConfigRoot `
                 -PrivateLogRoot $PrivateLogRoot
             [void]$info.ArgumentList.Add('vrmonitor://quit')
@@ -296,11 +277,15 @@ function Stop-SteamVrRuntime {
 function New-OpenVrProcessInfo {
     param(
         [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$SteamVrRoot,
         [Parameter(Mandatory)][string]$PrivateConfigRoot,
         [Parameter(Mandatory)][string]$PrivateLogRoot
     )
 
-    $environment = Get-OpenVrEnvironment -PrivateConfigRoot $PrivateConfigRoot -PrivateLogRoot $PrivateLogRoot
+    $environment = Get-OpenVrEnvironment `
+        -SteamVrRoot $SteamVrRoot `
+        -PrivateConfigRoot $PrivateConfigRoot `
+        -PrivateLogRoot $PrivateLogRoot
     $info = [System.Diagnostics.ProcessStartInfo]::new()
     $info.FileName = $Path
     $info.WorkingDirectory = Split-Path -Parent $Path
@@ -314,12 +299,14 @@ function New-OpenVrProcessInfo {
 function Start-VrStartupProcess {
     param(
         [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$SteamVrRoot,
         [Parameter(Mandatory)][string]$PrivateConfigRoot,
         [Parameter(Mandatory)][string]$PrivateLogRoot
     )
 
     $info = New-OpenVrProcessInfo `
         -Path $Path `
+        -SteamVrRoot $SteamVrRoot `
         -PrivateConfigRoot $PrivateConfigRoot `
         -PrivateLogRoot $PrivateLogRoot
     [System.Diagnostics.Process]::Start($info)

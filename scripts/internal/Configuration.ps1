@@ -14,6 +14,9 @@ function Get-HeadlessSettingsText {
   },
   "dashboard": {
     "enableDashboard": false
+  },
+  "direct_mode": {
+    "enable": false
   }
 }
 '@
@@ -40,11 +43,13 @@ function Get-TemporaryChaperoneText {
 
 function Get-OpenVrEnvironment {
     param(
+        [Parameter(Mandatory)][string]$SteamVrRoot,
         [Parameter(Mandatory)][string]$PrivateConfigRoot,
         [Parameter(Mandatory)][string]$PrivateLogRoot
     )
 
     [pscustomobject][ordered]@{
+        VR_OVERRIDE = ConvertTo-FullPath $SteamVrRoot
         VR_CONFIG_PATH = ConvertTo-FullPath $PrivateConfigRoot
         VR_LOG_PATH = ConvertTo-FullPath $PrivateLogRoot
     }

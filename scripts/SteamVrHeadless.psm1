@@ -8,7 +8,6 @@ foreach ($file in @(
     'Runtime.ps1',
     'Journal.ps1',
     'Cleanup.ps1',
-    'Recovery.ps1',
     'Commands.ps1',
     'Supervisor.ps1'
 )) {
@@ -20,6 +19,5 @@ Export-ModuleMember -Function @(
     'Start-SteamVrHeadlessRun',
     'Get-SteamVrHeadlessStatus',
     'Stop-SteamVrHeadlessRun',
-    'Invoke-SteamVrHeadlessRecovery',
     'Invoke-SteamVrHeadlessSupervisor'
 )

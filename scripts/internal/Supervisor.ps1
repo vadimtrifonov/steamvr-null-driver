@@ -1,3 +1,23 @@
+function Assert-RunContinues {
+    param(
+        [Parameter(Mandatory)][string]$RunDirectory,
+        [Parameter(Mandatory)][DateTime]$LeaseDeadline
+    )
+
+    if (Test-Path -LiteralPath (Join-Path $RunDirectory 'stop.request')) {
+        $exception = [InvalidOperationException]::new('The run was stopped by request.')
+        $exception.Data['RunReason'] = 'requested'
+        $exception.Data['RunOutcome'] = 'stopped'
+        throw $exception
+    }
+    if ([DateTime]::UtcNow -ge $LeaseDeadline) {
+        $exception = [TimeoutException]::new('The run lease expired.')
+        $exception.Data['RunReason'] = 'lease-expired'
+        $exception.Data['RunOutcome'] = 'expired'
+        throw $exception
+    }
+}
+
 function Invoke-SteamVrHeadlessSupervisor {
     [CmdletBinding()]
     param(
@@ -31,6 +51,7 @@ function Invoke-SteamVrHeadlessSupervisor {
         error = $null
         deadlineUtc = $configuration.deadlineUtc
         environment = Get-OpenVrEnvironment `
+            -SteamVrRoot $configuration.steamVrRoot `
             -PrivateConfigRoot $configuration.privateConfigRoot `
             -PrivateLogRoot $configuration.privateLogRoot
         evidence = $null
@@ -44,58 +65,41 @@ function Invoke-SteamVrHeadlessSupervisor {
 
     try {
         Write-RunStatus -RunDirectory $runDirectory -RunId $RunId -Phase 'preflight' -Message 'Checking exclusive SteamVR ownership.' -State $state | Out-Null
+        Assert-RunContinues -RunDirectory $runDirectory -LeaseDeadline $leaseDeadline
         if (@(Get-SteamVrRuntimeProcesses -SteamVrRoot $configuration.steamVrRoot).Count -gt 0) {
-            throw 'SteamVR started before the supervisor acquired the runtime. No configuration was changed.'
-        }
-        if ([DateTime]::UtcNow -ge $leaseDeadline) {
-            $state.reason = 'lease-expired'
-            $outcome = 'expired'
-            throw 'The run lease expired before configuration started.'
+            throw 'A SteamVR process started after the run reserved the runtime.'
         }
 
         Write-RunStatus -RunDirectory $runDirectory -RunId $RunId -Phase 'configuring' -Message 'Creating an isolated null-driver configuration.' -State $state | Out-Null
-        $null = Initialize-PrivateHeadlessConfiguration `
+        Initialize-PrivateHeadlessConfiguration `
             -PrivateConfigRoot $configuration.privateConfigRoot `
             -PrivateLogRoot $configuration.privateLogRoot
+        Assert-RunContinues -RunDirectory $runDirectory -LeaseDeadline $leaseDeadline
         if (@(Get-SteamVrRuntimeProcesses -SteamVrRoot $configuration.steamVrRoot).Count -gt 0) {
-            throw 'SteamVR started while the private configuration was prepared.'
+            throw 'A SteamVR process started while the private configuration was prepared.'
         }
 
-        if ([DateTime]::UtcNow -ge $leaseDeadline) {
-            $state.reason = 'lease-expired'
-            $outcome = 'expired'
-            throw 'The run lease expired before SteamVR startup.'
-        }
         Write-RunStatus -RunDirectory $runDirectory -RunId $RunId -Phase 'starting' -Message 'Starting SteamVR.' -State $state | Out-Null
         [void](Start-VrStartupProcess `
             -Path $configuration.vrStartupPath `
+            -SteamVrRoot $configuration.steamVrRoot `
             -PrivateConfigRoot $configuration.privateConfigRoot `
             -PrivateLogRoot $configuration.privateLogRoot)
 
         $startupDeadline = [DateTime]::UtcNow.AddSeconds([int]$configuration.startupTimeoutSeconds)
+        $readySince = $null
+        $startupValidated = $false
         do {
-            if ([DateTime]::UtcNow -ge $leaseDeadline) {
-                $state.reason = 'lease-expired'
-                $outcome = 'expired'
-                throw 'The run lease expired during SteamVR startup.'
-            }
-
+            Assert-RunContinues -RunDirectory $runDirectory -LeaseDeadline $leaseDeadline
             $runtimeProcesses = @(Get-SteamVrRuntimeProcesses -SteamVrRoot $configuration.steamVrRoot)
             if (@($runtimeProcesses | Where-Object { $_.name -eq 'steamvr_room_setup' }).Count -gt 0) {
                 throw 'SteamVR Room Setup started during headless startup.'
             }
-            $assessment = Get-VrLogAssessment -Text (Read-VrLogText -Path $vrServerLog)
-            $servers = @($runtimeProcesses | Where-Object { $_.name -eq 'vrserver' })
-            $compositors = @($runtimeProcesses | Where-Object { $_.name -eq 'vrcompositor' })
-            if ($servers.Count -gt 1 -or $compositors.Count -gt 1) {
-                throw 'More than one SteamVR server or compositor process started.'
-            }
-            $hasServer = $servers.Count -eq 1
-            $hasCompositor = $compositors.Count -eq 1
-            $assessment | Add-Member -MemberType NoteProperty -Name serverRunning -Value $hasServer
-            $assessment | Add-Member -MemberType NoteProperty -Name compositorRunning -Value $hasCompositor
-            $state.evidence = $assessment
 
+            $assessment = Get-VrLogAssessment -Text (Read-VrLogText -Path $vrServerLog)
+            if ($assessment.directModeDetected) {
+                throw 'SteamVR attempted to enable Direct Display Mode.'
+            }
             if ($assessment.modeViolation) {
                 $drivers = @($assessment.unexpectedDrivers + $assessment.unexpectedHmdDrivers | Sort-Object -Unique) -join ', '
                 throw "Unexpected SteamVR driver or HMD mode detected: $drivers"
@@ -103,66 +107,53 @@ function Invoke-SteamVrHeadlessSupervisor {
             if ($assessment.roomSetupDetected) {
                 throw 'SteamVR Room Setup launched during headless startup.'
             }
-            if ($assessment.ready -and $hasServer -and $hasCompositor) {
-                $serverRecord = $servers[0]
-                $compositorRecord = $compositors[0]
-                break
+
+            $servers = @($runtimeProcesses | Where-Object { $_.name -eq 'vrserver' })
+            $compositors = @($runtimeProcesses | Where-Object { $_.name -eq 'vrcompositor' })
+            if ($servers.Count -gt 1 -or $compositors.Count -gt 1) {
+                throw 'More than one SteamVR server or compositor process started.'
+            }
+
+            if ($null -eq $readySince) {
+                $serverRunning = $servers.Count -eq 1
+                $compositorRunning = $compositors.Count -eq 1
+                $assessment | Add-Member -MemberType NoteProperty -Name serverRunning -Value $serverRunning
+                $assessment | Add-Member -MemberType NoteProperty -Name compositorRunning -Value $compositorRunning
+                $state.evidence = $assessment
+                if ($assessment.ready -and $serverRunning -and $compositorRunning) {
+                    $serverRecord = $servers[0]
+                    $compositorRecord = $compositors[0]
+                    $readySince = [DateTime]::UtcNow
+                }
+            } else {
+                $serverStable = $servers.Count -eq 1 -and (Test-ProcessRecordsMatch -First $servers[0] -Second $serverRecord)
+                $compositorStable = $compositors.Count -eq 1 -and (Test-ProcessRecordsMatch -First $compositors[0] -Second $compositorRecord)
+                $assessment | Add-Member -MemberType NoteProperty -Name serverRunning -Value $serverStable
+                $assessment | Add-Member -MemberType NoteProperty -Name compositorRunning -Value $compositorStable
+                $state.evidence = $assessment
+                if (-not $assessment.ready -or -not $serverStable -or -not $compositorStable) {
+                    throw 'SteamVR did not remain in the expected null-only server and compositor mode during startup validation.'
+                }
+                if (([DateTime]::UtcNow - $readySince).TotalSeconds -ge 5) {
+                    $startupValidated = $true
+                    break
+                }
             }
             Start-Sleep -Milliseconds 400
         } while ([DateTime]::UtcNow -lt $startupDeadline)
 
-        if (-not $state.evidence.ready -or -not $state.evidence.serverRunning -or -not $state.evidence.compositorRunning) {
+        if (-not $startupValidated) {
+            if ($readySince) {
+                throw 'SteamVR did not remain stable for five seconds before the startup timeout.'
+            }
             throw 'SteamVR did not establish the expected null-only server and compositor before the startup timeout.'
         }
 
-        $stabilityDeadline = [DateTime]::UtcNow.AddSeconds(5)
-        while ([DateTime]::UtcNow -lt $stabilityDeadline) {
-            if ([DateTime]::UtcNow -ge $leaseDeadline) {
-                $state.reason = 'lease-expired'
-                $outcome = 'expired'
-                throw 'The run lease expired during startup validation.'
-            }
-            Start-Sleep -Milliseconds 400
-            $runtimeProcesses = @(Get-SteamVrRuntimeProcesses -SteamVrRoot $configuration.steamVrRoot)
-            if (@($runtimeProcesses | Where-Object { $_.name -eq 'steamvr_room_setup' }).Count -gt 0) {
-                throw 'SteamVR Room Setup started during startup validation.'
-            }
-
-            $servers = @($runtimeProcesses | Where-Object { $_.name -eq 'vrserver' })
-            $compositors = @($runtimeProcesses | Where-Object { $_.name -eq 'vrcompositor' })
-            $serverStable = $servers.Count -eq 1 -and (Test-ProcessRecordsMatch -First $servers[0] -Second $serverRecord)
-            $compositorStable = $compositors.Count -eq 1 -and (Test-ProcessRecordsMatch -First $compositors[0] -Second $compositorRecord)
-            $assessment = Get-VrLogAssessment -Text (Read-VrLogText -Path $vrServerLog)
-            $assessment | Add-Member -MemberType NoteProperty -Name serverRunning -Value $serverStable
-            $assessment | Add-Member -MemberType NoteProperty -Name compositorRunning -Value $compositorStable
-            $state.evidence = $assessment
-
-            if ($assessment.modeViolation) {
-                $drivers = @($assessment.unexpectedDrivers + $assessment.unexpectedHmdDrivers | Sort-Object -Unique) -join ', '
-                throw "Unexpected SteamVR driver or HMD mode detected during startup validation: $drivers"
-            }
-            if ($assessment.roomSetupDetected) {
-                throw 'SteamVR Room Setup launched during startup validation.'
-            }
-            if (-not $assessment.ready -or -not $serverStable -or -not $compositorStable) {
-                throw 'SteamVR did not remain in the expected null-only server and compositor mode during startup validation.'
-            }
-        }
-
         $state.ready = $true
-        $outcome = 'stopped'
         Write-RunStatus -RunDirectory $runDirectory -RunId $RunId -Phase 'ready' -Message 'SteamVR is running with the null HMD and compositor.' -State $state | Out-Null
 
         while ($true) {
-            if (Test-Path -LiteralPath (Join-Path $runDirectory 'stop.request')) {
-                $state.reason = 'requested'
-                break
-            }
-            if ([DateTime]::UtcNow -ge $leaseDeadline) {
-                $state.reason = 'lease-expired'
-                $outcome = 'expired'
-                break
-            }
+            Assert-RunContinues -RunDirectory $runDirectory -LeaseDeadline $leaseDeadline
             if (-not (Test-ProcessRecordAlive -Record $serverRecord)) {
                 throw 'The owned vrserver process exited unexpectedly.'
             }
@@ -172,12 +163,14 @@ function Invoke-SteamVrHeadlessSupervisor {
             Start-Sleep -Seconds 2
         }
     } catch {
-        if ($state.reason -eq 'lease-expired') {
+        $controlOutcome = $_.Exception.Data['RunOutcome']
+        if ($controlOutcome) {
+            $state.reason = [string]$_.Exception.Data['RunReason']
             $state.error = $null
-            $outcome = 'expired'
+            $outcome = [string]$controlOutcome
         } else {
             $state.error = $_.Exception.Message
-            $state.reason = if ($state.reason) { $state.reason } else { 'failure' }
+            $state.reason = 'failure'
             $outcome = 'failed'
         }
     } finally {
@@ -192,14 +185,14 @@ function Invoke-SteamVrHeadlessSupervisor {
             }
             $state.cleanupComplete = [bool]$cleanup.complete
             if (-not $cleanup.complete) {
-                $outcome = 'recovery-required'
+                $outcome = 'cleanup-required'
                 if (-not $state.error) {
                     $state.error = $cleanup.error
                 }
             }
         } catch {
             $state.cleanupComplete = $false
-            $outcome = 'recovery-required'
+            $outcome = 'cleanup-required'
             if (-not $state.error) {
                 $state.error = $_.Exception.Message
             }

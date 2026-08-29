@@ -96,6 +96,7 @@ function Read-RunConfiguration {
     }
 
     $steamVrRoot = ConvertTo-FullPath ([string]$stored.steamVrRoot)
+    Assert-SteamVrRuntimeLayout -SteamVrRoot $steamVrRoot
     [pscustomobject][ordered]@{
         schemaVersion = 5
         runId = [string]$stored.runId
@@ -200,6 +201,76 @@ function Remove-EmptyStateDirectories {
         @(Get-ChildItem -LiteralPath $StateRoot -Force).Count -eq 0) {
         Remove-Item -LiteralPath $StateRoot -Force
     }
+}
+
+function Get-InactiveRunRecords {
+    param(
+        [Parameter(Mandatory)][string]$StateRoot,
+        [AllowNull()]$ActiveRun
+    )
+
+    $runsRoot = Join-Path $StateRoot 'runs'
+    if (-not (Test-Path -LiteralPath $runsRoot -PathType Container)) {
+        return @()
+    }
+
+    $activeRunId = if ($ActiveRun) { [string]$ActiveRun.runId } else { $null }
+    @(
+        foreach ($directory in @(Get-ChildItem -LiteralPath $runsRoot -Directory -Force)) {
+            if ($activeRunId -and $directory.Name -ceq $activeRunId) {
+                continue
+            }
+
+            $record = [ordered]@{
+                runId = $directory.Name
+                phase = 'unknown'
+                cleanupComplete = $null
+                updatedUtc = $null
+                error = $null
+            }
+            $statusPath = Join-Path $directory.FullName 'status.json'
+            if (Test-Path -LiteralPath $statusPath -PathType Leaf) {
+                try {
+                    $status = Read-JsonShared -Path $statusPath
+                    if ($status.phase) { $record.phase = [string]$status.phase }
+                    if ($null -ne $status.PSObject.Properties['cleanupComplete']) {
+                        $record.cleanupComplete = [bool]$status.cleanupComplete
+                    }
+                    if ($status.updatedUtc) { $record.updatedUtc = [string]$status.updatedUtc }
+                } catch {
+                    $record.error = $_.Exception.Message
+                }
+            }
+            [pscustomobject]$record
+        }
+    )
+}
+
+function Remove-InactiveRunDirectories {
+    param(
+        [Parameter(Mandatory)][string]$StateRoot,
+        [Parameter(Mandatory)][string]$ActiveRunId,
+        [Parameter(Mandatory)][string]$ActiveRunDirectory
+    )
+
+    $null = Assert-ActiveRunOwnership `
+        -StateRoot $StateRoot `
+        -RunId $ActiveRunId `
+        -RunDirectory $ActiveRunDirectory
+    $runsRoot = Join-Path $StateRoot 'runs'
+    if (-not (Test-Path -LiteralPath $runsRoot -PathType Container)) {
+        return @()
+    }
+
+    @(
+        foreach ($directory in @(Get-ChildItem -LiteralPath $runsRoot -Directory -Force)) {
+            if ($directory.Name -ceq $ActiveRunId) {
+                continue
+            }
+            Remove-Item -LiteralPath $directory.FullName -Recurse -Force -ErrorAction Stop
+            $directory.Name
+        }
+    )
 }
 
 function Get-RunSupervisor {
