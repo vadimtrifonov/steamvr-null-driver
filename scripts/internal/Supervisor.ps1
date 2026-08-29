@@ -21,15 +21,7 @@ function Invoke-SteamVrHeadlessSupervisor {
     if (-not (Test-ProcessRecordsMatch -First $supervisor -Second $launch.supervisor)) {
         throw 'The detached-supervisor identity does not match the launch record.'
     }
-    $configuration.supervisor = $supervisor
-    Write-JsonAtomic -Path (Join-Path $runDirectory 'run.json') -Value $configuration
-    Update-ActiveRunRecord -StateRoot $StateRoot -RunId $RunId -Record ([ordered]@{
-        schemaVersion = 1
-        runId = $RunId
-        runDirectory = $runDirectory
-        createdUtc = $configuration.createdUtc
-        supervisor = $supervisor
-    })
+    $null = Assert-ActiveRunOwnership -StateRoot $StateRoot -RunId $RunId -RunDirectory $runDirectory
 
     $state = [ordered]@{
         supervisor = $supervisor
@@ -42,7 +34,6 @@ function Invoke-SteamVrHeadlessSupervisor {
             -PrivateConfigRoot $configuration.privateConfigRoot `
             -PrivateLogRoot $configuration.privateLogRoot
         evidence = $null
-        processes = @()
         cleanup = $null
     }
     $leaseDeadline = ConvertTo-UtcDateTime $configuration.deadlineUtc
@@ -90,13 +81,13 @@ function Invoke-SteamVrHeadlessSupervisor {
                 throw 'The run lease expired during SteamVR startup.'
             }
 
-            $state.processes = @(Get-SteamVrRuntimeProcesses -SteamVrRoot $configuration.steamVrRoot)
-            if (@($state.processes | Where-Object { $_.name -eq 'steamvr_room_setup' }).Count -gt 0) {
+            $runtimeProcesses = @(Get-SteamVrRuntimeProcesses -SteamVrRoot $configuration.steamVrRoot)
+            if (@($runtimeProcesses | Where-Object { $_.name -eq 'steamvr_room_setup' }).Count -gt 0) {
                 throw 'SteamVR Room Setup started during headless startup.'
             }
             $assessment = Get-VrLogAssessment -Text (Read-VrLogText -Path $vrServerLog)
-            $servers = @($state.processes | Where-Object { $_.name -eq 'vrserver' })
-            $compositors = @($state.processes | Where-Object { $_.name -eq 'vrcompositor' })
+            $servers = @($runtimeProcesses | Where-Object { $_.name -eq 'vrserver' })
+            $compositors = @($runtimeProcesses | Where-Object { $_.name -eq 'vrcompositor' })
             if ($servers.Count -gt 1 -or $compositors.Count -gt 1) {
                 throw 'More than one SteamVR server or compositor process started.'
             }
@@ -133,13 +124,13 @@ function Invoke-SteamVrHeadlessSupervisor {
                 throw 'The run lease expired during startup validation.'
             }
             Start-Sleep -Milliseconds 400
-            $state.processes = @(Get-SteamVrRuntimeProcesses -SteamVrRoot $configuration.steamVrRoot)
-            if (@($state.processes | Where-Object { $_.name -eq 'steamvr_room_setup' }).Count -gt 0) {
+            $runtimeProcesses = @(Get-SteamVrRuntimeProcesses -SteamVrRoot $configuration.steamVrRoot)
+            if (@($runtimeProcesses | Where-Object { $_.name -eq 'steamvr_room_setup' }).Count -gt 0) {
                 throw 'SteamVR Room Setup started during startup validation.'
             }
 
-            $servers = @($state.processes | Where-Object { $_.name -eq 'vrserver' })
-            $compositors = @($state.processes | Where-Object { $_.name -eq 'vrcompositor' })
+            $servers = @($runtimeProcesses | Where-Object { $_.name -eq 'vrserver' })
+            $compositors = @($runtimeProcesses | Where-Object { $_.name -eq 'vrcompositor' })
             $serverStable = $servers.Count -eq 1 -and (Test-ProcessRecordsMatch -First $servers[0] -Second $serverRecord)
             $compositorStable = $compositors.Count -eq 1 -and (Test-ProcessRecordsMatch -First $compositors[0] -Second $compositorRecord)
             $assessment = Get-VrLogAssessment -Text (Read-VrLogText -Path $vrServerLog)
@@ -196,7 +187,6 @@ function Invoke-SteamVrHeadlessSupervisor {
 
         try {
             $cleanup = Invoke-RunCleanup -RunDirectory $runDirectory -StateRoot $StateRoot -Configuration $configuration
-            $state.processes = if ($cleanup.processStops) { @($cleanup.processStops.remaining) } else { @() }
             $state.cleanup = [pscustomobject]@{
                 processStops = $cleanup.processStops
                 lockRemoved = $cleanup.lockRemoved

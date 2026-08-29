@@ -18,6 +18,8 @@ Headless means that SteamVR uses its bundled `null` HMD. A compositor, a GPU, an
 
 Each run copies the source `steamvr.vrsettings` file into its run directory. The helper changes only this private copy.
 
+SteamVR creates its run-specific application configuration under the private config path.
+
 The run also has private chaperone data and private SteamVR logs. The helper starts SteamVR with these environment variables:
 
 - `VR_CONFIG_PATH`
@@ -75,11 +77,36 @@ A malformed active journal or an active lock without its journal requires manual
 
 Competing start commands fail safely. Stop and recover commands require serialization.
 
-## Read-only check
+## Installation discovery
+
+The helper finds the Steam client root from the Valve Steam registry entries.
+
+It finds SteamVR from the Steam App 250820 registration. If that registration is unavailable, it examines the default library under the Steam root.
+
+Automatic discovery supports these layouts:
+
+- Steam and SteamVR in the same Steam root.
+- SteamVR in another Steam library with a valid Steam App 250820 registration.
+
+### Discovery limits
+
+- Automatic discovery supports one Steam client and one SteamVR installation.
+- The source settings file must be `<Steam-root>\config\steamvr.vrsettings`.
+- A split-library installation requires a valid Steam App 250820 registration.
+- Custom OpenVR source-configuration paths are outside this contract.
+
+Supply explicit paths if discovery is unavailable or ambiguous:
 
 ```powershell
 pwsh -NoProfile -File scripts/steamvr-headless.ps1 check `
-  -SteamRoot "C:\Steam"
+  -SteamRoot "<Steam-client-root>" `
+  -SteamVrRoot "<SteamVR-root>"
+```
+
+## Read-only check
+
+```powershell
+pwsh -NoProfile -File scripts/steamvr-headless.ps1 check
 ```
 
 Continue only when `ok=true` and `canStart=true`.
@@ -88,7 +115,6 @@ Continue only when `ok=true` and `canStart=true`.
 
 ```powershell
 pwsh -NoProfile -File scripts/steamvr-headless.ps1 start `
-  -SteamRoot "C:\Steam" `
   -MaxDurationMinutes 30
 ```
 

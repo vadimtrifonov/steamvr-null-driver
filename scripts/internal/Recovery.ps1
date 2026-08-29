@@ -2,12 +2,13 @@ function Invoke-DeadRunCleanup {
     param(
         [Parameter(Mandatory)][string]$RunDirectory,
         [Parameter(Mandatory)][string]$StateRoot,
-        [Parameter(Mandatory)]$Configuration
+        [Parameter(Mandatory)]$Configuration,
+        [AllowNull()]$Supervisor
     )
 
     $cleanup = Invoke-RunCleanup -RunDirectory $RunDirectory -StateRoot $StateRoot -Configuration $Configuration
     $state = [ordered]@{
-        supervisor = $Configuration.supervisor
+        supervisor = $Supervisor
         ready = $false
         cleanupComplete = [bool]$cleanup.complete
         reason = 'manual-recovery'
@@ -17,7 +18,6 @@ function Invoke-DeadRunCleanup {
             -PrivateConfigRoot $Configuration.privateConfigRoot `
             -PrivateLogRoot $Configuration.privateLogRoot
         evidence = $null
-        processes = if ($cleanup.processStops) { @($cleanup.processStops.remaining) } else { @() }
         cleanup = [pscustomobject]@{
             processStops = $cleanup.processStops
             lockRemoved = $cleanup.lockRemoved
@@ -25,8 +25,10 @@ function Invoke-DeadRunCleanup {
     }
     $phase = if ($cleanup.complete) { 'recovered' } else { 'recovery-required' }
     $message = if ($cleanup.complete) { 'Stale run recovered.' } else { 'Stale run recovery was incomplete.' }
-    $status = New-RunStatus -RunId $Configuration.runId -Phase $phase -Message $message -State $state
-    $null = Write-RunStatusBestEffort -RunDirectory $RunDirectory -RunId $Configuration.runId -Phase $phase -Message $message -State $state
+    $status = Write-RunStatusBestEffort -RunDirectory $RunDirectory -RunId $Configuration.runId -Phase $phase -Message $message -State $state
+    if ($null -eq $status) {
+        $status = New-RunStatus -RunId $Configuration.runId -Phase $phase -Message $message -State $state
+    }
     $status
 }
 
@@ -63,16 +65,13 @@ function Invoke-SteamVrHeadlessRecovery {
                 Remove-Item -LiteralPath $activeDirectory -Recurse -Force
                 $recovered.Add([pscustomobject]@{ runId=$activeRunId; result='removed completed active journal' })
             } else {
-                $supervisor = Get-RunSupervisor -RunDirectory $activeDirectory -Configuration $configuration
+                $supervisor = Get-RunSupervisor -RunDirectory $activeDirectory
                 if ($supervisor -and (Get-SupervisorAlive -Supervisor $supervisor)) {
                     $activeRuns.Add([pscustomobject]@{ runId=$activeRunId; result='supervisor is active' })
                 } elseif (-not $supervisor -and (Test-SupervisorHandoffPending -RunDirectory $activeDirectory -Configuration $configuration)) {
                     $activeRuns.Add([pscustomobject]@{ runId=$activeRunId; result='supervisor handoff is pending' })
                 } else {
-                    if ($supervisor) {
-                        $configuration.supervisor = $supervisor
-                    }
-                    $status = Invoke-DeadRunCleanup -RunDirectory $activeDirectory -StateRoot $StateRoot -Configuration $configuration
+                    $status = Invoke-DeadRunCleanup -RunDirectory $activeDirectory -StateRoot $StateRoot -Configuration $configuration -Supervisor $supervisor
                     if ($status.cleanupComplete) {
                         $active = $null
                         Remove-Item -LiteralPath $activeDirectory -Recurse -Force

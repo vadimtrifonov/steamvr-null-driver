@@ -8,63 +8,100 @@ $script:CanonicalSteamVrProcessNames = @(
     'vrstartup'
 )
 
+function Get-RegisteredSteamRoots {
+    $roots = [System.Collections.Generic.List[string]]::new()
+    foreach ($registryPath in @(
+        'HKCU:\SOFTWARE\Valve\Steam',
+        'HKLM:\SOFTWARE\WOW6432Node\Valve\Steam',
+        'HKLM:\SOFTWARE\Valve\Steam'
+    )) {
+        try {
+            $properties = Get-ItemProperty -LiteralPath $registryPath -ErrorAction Stop
+            foreach ($propertyName in @('SteamPath', 'InstallPath')) {
+                $property = $properties.PSObject.Properties[$propertyName]
+                if ($property -and $property.Value) {
+                    $roots.Add((ConvertTo-FullPath ([string]$property.Value)))
+                }
+            }
+            $steamExe = $properties.PSObject.Properties['SteamExe']
+            if ($steamExe -and $steamExe.Value) {
+                $roots.Add((ConvertTo-FullPath (Split-Path -Parent ([string]$steamExe.Value))))
+            }
+        } catch {}
+    }
+    @($roots | Sort-Object -Unique)
+}
+
+function Get-RegisteredSteamVrRoots {
+    $roots = [System.Collections.Generic.List[string]]::new()
+    foreach ($registryPath in @(
+        'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Steam App 250820',
+        'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\Steam App 250820',
+        'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Steam App 250820'
+    )) {
+        try {
+            $installLocation = (Get-ItemProperty -LiteralPath $registryPath -Name InstallLocation -ErrorAction Stop).InstallLocation
+            if ($installLocation) {
+                $roots.Add((ConvertTo-FullPath ([string]$installLocation)))
+            }
+        } catch {}
+    }
+    @($roots | Sort-Object -Unique)
+}
+
 function Resolve-SteamVrPaths {
     param(
         [string]$SteamRoot,
         [string]$SteamVrRoot
     )
 
-    $candidates = [System.Collections.Generic.List[string]]::new()
-    if ($SteamRoot) {
-        $candidates.Add((ConvertTo-FullPath $SteamRoot))
+    $steamRoots = @(if ($SteamRoot) {
+        ConvertTo-FullPath $SteamRoot
     } else {
-        foreach ($path in @('C:\Steam', 'C:\Program Files (x86)\Steam', 'C:\Program Files\Steam')) {
-            if (Test-Path -LiteralPath $path) {
-                $candidates.Add((ConvertTo-FullPath $path))
-            }
-        }
-        foreach ($registryPath in @(
-            'HKCU:\SOFTWARE\Valve\Steam',
-            'HKLM:\SOFTWARE\WOW6432Node\Valve\Steam',
-            'HKLM:\SOFTWARE\Valve\Steam'
-        )) {
-            try {
-                $installPath = (Get-ItemProperty -LiteralPath $registryPath -Name InstallPath -ErrorAction Stop).InstallPath
-                if ($installPath) {
-                    $candidates.Add((ConvertTo-FullPath $installPath))
-                }
-            } catch {}
-        }
+        Get-RegisteredSteamRoots
+    })
+    if ($steamRoots.Count -eq 0) {
+        throw 'Steam was not found in the supported registry locations. Supply -SteamRoot.'
     }
 
-    $valid = [System.Collections.Generic.List[object]]::new()
-    foreach ($candidate in @($candidates | Sort-Object -Unique)) {
-        $runtimeRoot = if ($SteamVrRoot) {
-            ConvertTo-FullPath $SteamVrRoot
+    $sourceRoots = @($steamRoots | Where-Object {
+        Test-Path -LiteralPath (Join-Path $_ 'config\steamvr.vrsettings') -PathType Leaf
+    })
+    if ($sourceRoots.Count -eq 0) {
+        throw 'No Steam root contained config\steamvr.vrsettings. Supply -SteamRoot.'
+    }
+    if ($sourceRoots.Count -gt 1) {
+        throw "More than one Steam root contained source settings: $($sourceRoots -join ', '). Supply -SteamRoot."
+    }
+
+    if ($SteamVrRoot) {
+        $runtimeRoot = ConvertTo-FullPath $SteamVrRoot
+    } else {
+        $registeredRoots = @(Get-RegisteredSteamVrRoots | Where-Object {
+            Test-Path -LiteralPath (Join-Path $_ 'bin\win64\vrstartup.exe') -PathType Leaf
+        })
+        if ($registeredRoots.Count -gt 1) {
+            throw "More than one registered SteamVR installation was found: $($registeredRoots -join ', '). Supply -SteamVrRoot."
+        }
+        $runtimeRoot = if ($registeredRoots.Count -eq 1) {
+            $registeredRoots[0]
         } else {
-            Join-Path $candidate 'steamapps\common\SteamVR'
+            ConvertTo-FullPath (Join-Path $sourceRoots[0] 'steamapps\common\SteamVR')
         }
-        $sourceSettingsPath = Join-Path $candidate 'config\steamvr.vrsettings'
-        $startupPath = Join-Path $runtimeRoot 'bin\win64\vrstartup.exe'
-        if ((Test-Path -LiteralPath $sourceSettingsPath -PathType Leaf) -and (Test-Path -LiteralPath $startupPath -PathType Leaf)) {
-            $valid.Add([pscustomobject]@{
-                steamRoot = $candidate
-                steamVrRoot = ConvertTo-FullPath $runtimeRoot
-                sourceConfigRoot = Join-Path $candidate 'config'
-                sourceSettingsPath = $sourceSettingsPath
-                vrStartupPath = $startupPath
-            })
-        }
+    }
+    $startupPath = Join-Path $runtimeRoot 'bin\win64\vrstartup.exe'
+    if (-not (Test-Path -LiteralPath $startupPath -PathType Leaf)) {
+        throw 'SteamVR was not found in its Steam app registration or under the Steam root. Supply -SteamVrRoot.'
     }
 
-    if ($valid.Count -eq 0) {
-        throw 'No Steam root contained both config\steamvr.vrsettings and the SteamVR vrstartup executable. Supply -SteamRoot and, if needed, -SteamVrRoot.'
+    $sourceConfigRoot = ConvertTo-FullPath (Join-Path $sourceRoots[0] 'config')
+    [pscustomobject]@{
+        steamRoot = ConvertTo-FullPath $sourceRoots[0]
+        steamVrRoot = ConvertTo-FullPath $runtimeRoot
+        sourceConfigRoot = $sourceConfigRoot
+        sourceSettingsPath = Join-Path $sourceConfigRoot 'steamvr.vrsettings'
+        vrStartupPath = ConvertTo-FullPath $startupPath
     }
-    if ($valid.Count -gt 1) {
-        $roots = @($valid | ForEach-Object { $_.steamRoot }) -join ', '
-        throw "More than one valid Steam installation was found: $roots. Supply -SteamRoot explicitly."
-    }
-    $valid[0]
 }
 
 function ConvertTo-ProcessRecord {

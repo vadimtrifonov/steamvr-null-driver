@@ -19,13 +19,11 @@ function New-RunStatus {
         [Parameter(Mandatory)]$State
     )
 
-    $supervisorPid = if ($State.supervisor) { [int]$State.supervisor.pid } else { 0 }
     [pscustomobject][ordered]@{
         runId = $RunId
         phase = $Phase
         message = $Message
         updatedUtc = Get-UtcText
-        supervisorPid = $supervisorPid
         supervisor = $State.supervisor
         ready = [bool]$State.ready
         cleanupComplete = [bool]$State.cleanupComplete
@@ -34,7 +32,6 @@ function New-RunStatus {
         deadlineUtc = $State.deadlineUtc
         environment = $State.environment
         evidence = $State.evidence
-        processes = @($State.processes | Where-Object { $null -ne $_ })
         cleanup = $State.cleanup
     }
 }
@@ -64,53 +61,55 @@ function Write-RunStatusBestEffort {
     )
 
     try {
-        Write-RunStatus -RunDirectory $RunDirectory -RunId $RunId -Phase $Phase -Message $Message -State $State | Out-Null
-        $true
+        Write-RunStatus -RunDirectory $RunDirectory -RunId $RunId -Phase $Phase -Message $Message -State $State
     } catch {
         Write-RunEvent -RunDirectory $RunDirectory -Message "status-write-failed - $($_.Exception.Message)"
-        $false
+        $null
     }
 }
 
 function Read-RunConfiguration {
     param([Parameter(Mandatory)][string]$RunDirectory)
 
-    $configuration = Read-JsonShared -Path (Join-Path $RunDirectory 'run.json')
-    Assert-RunId -RunId ([string]$configuration.runId)
-    if ((Split-Path -Leaf $RunDirectory) -cne [string]$configuration.runId) {
+    $stored = Read-JsonShared -Path (Join-Path $RunDirectory 'run.json')
+    Assert-RunId -RunId ([string]$stored.runId)
+    if ((Split-Path -Leaf $RunDirectory) -cne [string]$stored.runId) {
         throw 'The run configuration ID does not match its directory.'
     }
-
-    if ([int]$configuration.schemaVersion -ne 3) {
+    if ([int]$stored.schemaVersion -ne 4) {
         throw 'The run configuration has an unsupported schema version.'
     }
-    foreach ($name in @(
-        'createdUtc', 'deadlineUtc', 'steamRoot', 'steamVrRoot',
-        'sourceConfigRoot', 'privateConfigRoot', 'privateLogRoot', 'vrStartupPath'
-    )) {
-        if (-not [string]$configuration.$name) {
+    foreach ($name in @('createdUtc', 'deadlineUtc', 'startupTimeoutSeconds', 'steamRoot', 'steamVrRoot')) {
+        if (-not [string]$stored.$name) {
             throw "The run configuration is missing '$name'."
         }
     }
-    $null = ConvertTo-UtcDateTime $configuration.createdUtc
-    $null = ConvertTo-UtcDateTime $configuration.deadlineUtc
 
-    $expectedSourceConfigRoot = ConvertTo-FullPath (Join-Path ([string]$configuration.steamRoot) 'config')
-    $expectedPrivateConfigRoot = ConvertTo-FullPath (Join-Path $RunDirectory 'config')
-    $expectedPrivateLogRoot = ConvertTo-FullPath (Join-Path $RunDirectory 'logs')
-    if ((ConvertTo-FullPath ([string]$configuration.sourceConfigRoot)) -ne $expectedSourceConfigRoot) {
-        throw 'The run configuration contains an unexpected source config root.'
+    $createdUtc = ConvertTo-UtcDateTime $stored.createdUtc
+    $deadlineUtc = ConvertTo-UtcDateTime $stored.deadlineUtc
+    $startupTimeoutSeconds = [int]$stored.startupTimeoutSeconds
+    if ($deadlineUtc -le $createdUtc) {
+        throw 'The run deadline must be later than its creation time.'
     }
-    if ((ConvertTo-FullPath ([string]$configuration.privateConfigRoot)) -ne $expectedPrivateConfigRoot) {
-        throw 'The run configuration contains an unexpected private config path.'
+    if ($startupTimeoutSeconds -lt 15 -or $startupTimeoutSeconds -gt 300) {
+        throw 'The run startup timeout is outside the supported range.'
     }
-    if ((ConvertTo-FullPath ([string]$configuration.privateLogRoot)) -ne $expectedPrivateLogRoot) {
-        throw 'The run configuration contains an unexpected private log path.'
+
+    $steamRoot = ConvertTo-FullPath ([string]$stored.steamRoot)
+    $steamVrRoot = ConvertTo-FullPath ([string]$stored.steamVrRoot)
+    [pscustomobject][ordered]@{
+        schemaVersion = 4
+        runId = [string]$stored.runId
+        createdUtc = $createdUtc.ToString('o')
+        deadlineUtc = $deadlineUtc.ToString('o')
+        startupTimeoutSeconds = $startupTimeoutSeconds
+        steamRoot = $steamRoot
+        steamVrRoot = $steamVrRoot
+        sourceConfigRoot = ConvertTo-FullPath (Join-Path $steamRoot 'config')
+        privateConfigRoot = ConvertTo-FullPath (Join-Path $RunDirectory 'config')
+        privateLogRoot = ConvertTo-FullPath (Join-Path $RunDirectory 'logs')
+        vrStartupPath = ConvertTo-FullPath (Join-Path $steamVrRoot 'bin\win64\vrstartup.exe')
     }
-    if (-not (Test-PathWithin -Path ([string]$configuration.vrStartupPath) -Root ([string]$configuration.steamVrRoot))) {
-        throw 'The run configuration contains a startup executable outside its SteamVR root.'
-    }
-    $configuration
 }
 
 function Get-ActiveRunRecord {
@@ -123,11 +122,10 @@ function Get-ActiveRunRecord {
 
     $record = Read-JsonShared -Path $path
     Assert-RunId -RunId ([string]$record.runId)
-    $expectedDirectory = Get-RunDirectory -StateRoot $StateRoot -RunId ([string]$record.runId)
-    if ($record.runDirectory -and (ConvertTo-FullPath ([string]$record.runDirectory)) -ne $expectedDirectory) {
-        throw 'The active-run lock points outside its expected run directory.'
+    [pscustomobject]@{
+        runId = [string]$record.runId
+        runDirectory = Get-RunDirectory -StateRoot $StateRoot -RunId ([string]$record.runId)
     }
-    $record
 }
 
 function Assert-ActiveRunOwnership {
@@ -157,12 +155,13 @@ function Assert-ActiveRunOwnership {
 function New-ActiveRunRecord {
     param(
         [Parameter(Mandatory)][string]$StateRoot,
-        [Parameter(Mandatory)]$Record
+        [Parameter(Mandatory)][string]$RunId
     )
 
+    Assert-RunId -RunId $RunId
     New-Item -ItemType Directory -Path $StateRoot -Force | Out-Null
     $path = Join-Path $StateRoot 'active-run.json'
-    $json = $Record | ConvertTo-Json -Depth 10
+    $json = @{ runId=$RunId } | ConvertTo-Json
     $bytes = [System.Text.UTF8Encoding]::new($false).GetBytes($json)
     $stream = [System.IO.File]::Open($path, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
     try {
@@ -171,20 +170,6 @@ function New-ActiveRunRecord {
     } finally {
         $stream.Dispose()
     }
-}
-
-function Update-ActiveRunRecord {
-    param(
-        [Parameter(Mandatory)][string]$StateRoot,
-        [Parameter(Mandatory)][string]$RunId,
-        [Parameter(Mandatory)]$Record
-    )
-
-    $active = Get-ActiveRunRecord -StateRoot $StateRoot
-    if ($null -eq $active -or [string]$active.runId -cne $RunId) {
-        throw 'The active-run lock was lost before supervisor handoff completed.'
-    }
-    Write-JsonAtomic -Path (Join-Path $StateRoot 'active-run.json') -Value $Record
 }
 
 function Remove-ActiveRunRecord {
@@ -221,14 +206,8 @@ function Remove-EmptyStateDirectories {
 }
 
 function Get-RunSupervisor {
-    param(
-        [Parameter(Mandatory)][string]$RunDirectory,
-        [Parameter(Mandatory)]$Configuration
-    )
+    param([Parameter(Mandatory)][string]$RunDirectory)
 
-    if ($Configuration.supervisor) {
-        return $Configuration.supervisor
-    }
     $launchPath = Join-Path $RunDirectory 'launch.json'
     if (-not (Test-Path -LiteralPath $launchPath -PathType Leaf)) {
         return $null
@@ -246,7 +225,7 @@ function Test-SupervisorHandoffPending {
         [Parameter(Mandatory)]$Configuration
     )
 
-    if (Get-RunSupervisor -RunDirectory $RunDirectory -Configuration $Configuration) {
+    if (Get-RunSupervisor -RunDirectory $RunDirectory) {
         return $false
     }
     [DateTime]::UtcNow -lt (ConvertTo-UtcDateTime $Configuration.createdUtc).AddSeconds(15)

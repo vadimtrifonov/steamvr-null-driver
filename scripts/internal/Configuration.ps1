@@ -75,8 +75,6 @@ function Initialize-PrivateHeadlessConfiguration {
     $sourceSettingsPath = ConvertTo-FullPath (Join-Path $SourceConfigRoot 'steamvr.vrsettings')
     $privateSettingsPath = ConvertTo-FullPath (Join-Path $PrivateConfigRoot 'steamvr.vrsettings')
     $privateChaperonePath = ConvertTo-FullPath (Join-Path $PrivateConfigRoot 'chaperone_info.vrchap')
-    $sourceAppConfigPath = ConvertTo-FullPath (Join-Path $SourceConfigRoot 'appconfig.json')
-    $privateAppConfigPath = ConvertTo-FullPath (Join-Path $PrivateConfigRoot 'appconfig.json')
 
     $sourceSettings = [System.IO.File]::ReadAllText($sourceSettingsPath)
     $headlessSettings = ConvertTo-HeadlessSettingsText -InputText $sourceSettings
@@ -84,16 +82,4 @@ function Initialize-PrivateHeadlessConfiguration {
     New-Item -ItemType Directory -Path $PrivateConfigRoot, $PrivateLogRoot -Force | Out-Null
     [System.IO.File]::WriteAllText($privateSettingsPath, $headlessSettings, [System.Text.UTF8Encoding]::new($false))
     [System.IO.File]::WriteAllText($privateChaperonePath, (Get-TemporaryChaperoneText), [System.Text.UTF8Encoding]::new($false))
-
-    $appConfigCopied = Test-Path -LiteralPath $sourceAppConfigPath -PathType Leaf
-    if ($appConfigCopied) {
-        [System.IO.File]::WriteAllBytes($privateAppConfigPath, [System.IO.File]::ReadAllBytes($sourceAppConfigPath))
-    }
-
-    [pscustomobject]@{
-        sourceSettingsPath = $sourceSettingsPath
-        privateSettingsPath = $privateSettingsPath
-        privateChaperonePath = $privateChaperonePath
-        appConfigCopied = $appConfigCopied
-    }
 }
